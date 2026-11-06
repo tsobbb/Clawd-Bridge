@@ -1,0 +1,6 @@
+{
+  "name": "Clawd Bridge",
+  "description": "Android Media Sync Service with local HTTP API for real-time track and sub-millisecond playback position streaming.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

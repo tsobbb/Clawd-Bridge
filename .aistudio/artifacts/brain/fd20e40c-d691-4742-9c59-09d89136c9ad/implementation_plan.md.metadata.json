@@ -1,0 +1,6 @@
+{
+  "summary": "Implementation plan for Clawd Bridge, an Android Media Sync Service with local HTTP API (127.0.0.1:44444/now-playing), sub-millisecond playback position tracking, notification listener service, atomic disk backup, and Material 3 diagnostics UI with test player.",
+  "updatedAt": "2026-11-06T03:18:59.737214318Z",
+  "requestFeedback": true,
+  "userFacing": true
+}
