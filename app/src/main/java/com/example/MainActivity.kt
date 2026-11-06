@@ -6,14 +6,19 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.Manifest
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -43,7 +48,10 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Storage
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Tune
+import com.example.service.MediaBridgeForegroundService
+import com.example.service.NotificationRebindHelper
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -119,7 +127,11 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // Initialize core background services
         LocalHttpServer.start()
+        MediaBridgeForegroundService.start(this)
+        NotificationRebindHelper.rebindService(this)
 
         setContent {
             ClawdBridgeTheme {
@@ -159,19 +171,44 @@ fun ClawdBridgeScreen(modifier: Modifier = Modifier) {
     val backupStatus by BackupFileWriter.backupStatus.collectAsState()
 
     // Permission and battery state
-    var isNotificationAccessGranted by remember { mutableStateOf(checkNotificationAccess(context)) }
+    var isNotificationAccessGranted by remember {
+        mutableStateOf(NotificationRebindHelper.isNotificationAccessGranted(context))
+    }
     var isBatteryOptIgnored by remember { mutableStateOf(checkBatteryOptIgnored(context)) }
 
     // In-app API test response preview
     var apiTestResult by remember { mutableStateOf<TestApiResult?>(null) }
     var isTestingApi by remember { mutableStateOf(false) }
 
-    // Re-check permissions when returning to foreground
+    // Request POST_NOTIFICATIONS permission on Android 13+ (API 33+) for foreground notification
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            MediaBridgeForegroundService.start(context)
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.POST_NOTIFICATIONS
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+    }
+
+    // Re-check permissions and perform auto-rebind when returning to foreground
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
-                isNotificationAccessGranted = checkNotificationAccess(context)
+                isNotificationAccessGranted = NotificationRebindHelper.isNotificationAccessGranted(context)
                 isBatteryOptIgnored = checkBatteryOptIgnored(context)
+                MediaBridgeForegroundService.start(context)
+                NotificationRebindHelper.rebindService(context)
                 MediaBridgeStateHolder.refreshSnapshot()
             }
         }
@@ -179,10 +216,19 @@ fun ClawdBridgeScreen(modifier: Modifier = Modifier) {
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    // Live Monitor 4 Hz (250 ms) ticker per ТЗ section 4
+    // Live Monitor 4 Hz (250 ms) ticker per ТЗ section 4 + periodic auto-rebind check
+    var tickerCount by remember { mutableStateOf(0) }
     LaunchedEffect(Unit) {
         while (isActive) {
             MediaBridgeStateHolder.refreshSnapshot()
+            tickerCount++
+            if (tickerCount % 20 == 0) { // every ~5 seconds
+                val granted = NotificationRebindHelper.isNotificationAccessGranted(context)
+                isNotificationAccessGranted = granted
+                if (granted && !MediaBridgeStateHolder.isServiceConnected.value) {
+                    NotificationRebindHelper.rebindService(context)
+                }
+            }
             delay(250L)
         }
     }
@@ -196,20 +242,33 @@ fun ClawdBridgeScreen(modifier: Modifier = Modifier) {
         // App Header
         AppHeader(
             isServerRunning = isServerRunning,
-            onRestartServer = { LocalHttpServer.start() }
+            onRestartServer = {
+                LocalHttpServer.start()
+                MediaBridgeForegroundService.start(context)
+            }
         )
 
-        // 1. Service Status Indicator Badge (ТЗ 4.1)
+        // 1. Service Status Indicator Badge (ТЗ 4.1 & Auto-Rebind state)
         ServiceStatusBanner(
-            isServiceConnected = isServiceConnected || isNotificationAccessGranted,
-            isNotificationAccessGranted = isNotificationAccessGranted
+            isServiceConnected = isServiceConnected,
+            isNotificationAccessGranted = isNotificationAccessGranted,
+            onForceRebind = {
+                NotificationRebindHelper.forceRebindService(context)
+                MediaBridgeForegroundService.start(context)
+                Toast.makeText(context, "Выполнен сброс и повторная привязка службы...", Toast.LENGTH_SHORT).show()
+            }
         )
 
-        // 2 & 3. Action Buttons (ТЗ 4.2 & 4.3)
+        // 2 & 3. Action Buttons (ТЗ 4.2 & 4.3 + Rebind)
         ActionButtonsSection(
             context = context,
             isNotificationAccessGranted = isNotificationAccessGranted,
-            isBatteryOptIgnored = isBatteryOptIgnored
+            isBatteryOptIgnored = isBatteryOptIgnored,
+            onForceRebind = {
+                NotificationRebindHelper.forceRebindService(context)
+                MediaBridgeForegroundService.start(context)
+                Toast.makeText(context, "Служба принудительно переподключена", Toast.LENGTH_SHORT).show()
+            }
         )
 
         // 4. Live Monitor Diagnostic Card (ТЗ 4.4)
@@ -324,21 +383,42 @@ private fun AppHeader(
 }
 
 /**
- * 1. Service Status Indicator Badge (ТЗ 4.1)
+ * 1. Service Status Indicator Badge (ТЗ 4.1 & Auto-Rebind state)
  */
 @Composable
 private fun ServiceStatusBanner(
     isServiceConnected: Boolean,
-    isNotificationAccessGranted: Boolean
+    isNotificationAccessGranted: Boolean,
+    onForceRebind: () -> Unit
 ) {
-    val isActive = isServiceConnected && isNotificationAccessGranted
-    val bgColor = if (isActive) Color(0xFF0C2918) else Color(0xFF2C1010)
-    val borderColor = if (isActive) NeonEmerald else CoralRed
-    val statusText = if (isActive) "Служба активна" else "Требуется доступ к уведомлениям"
-    val subText = if (isActive) {
-        "Перехват MediaSession работает в реальном времени"
-    } else {
-        "Разрешите доступ к уведомлениям для чтения медиа-сессий"
+    val (statusText, subText, borderColor, bgColor, icon) = when {
+        isNotificationAccessGranted && isServiceConnected -> {
+            StatusBannerState(
+                status = "Служба активна",
+                subText = "IPC-сессия подключена, перехват работает в фоне",
+                color = NeonEmerald,
+                bg = Color(0xFF0C2918),
+                icon = Icons.Default.CheckCircle
+            )
+        }
+        isNotificationAccessGranted && !isServiceConnected -> {
+            StatusBannerState(
+                status = "Восстановление связки...",
+                subText = "Авто-Rebind в процессе (нажмите для ручного сброса)",
+                color = AmberWarning,
+                bg = Color(0xFF2C240C),
+                icon = Icons.Default.Refresh
+            )
+        }
+        else -> {
+            StatusBannerState(
+                status = "Требуется доступ к уведомлениям",
+                subText = "Разрешите доступ к уведомлениям для чтения медиа-сессий",
+                color = CoralRed,
+                bg = Color(0xFF2C1010),
+                icon = Icons.Default.Error
+            )
+        }
     }
 
     Card(
@@ -364,7 +444,7 @@ private fun ServiceStatusBanner(
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
-                    imageVector = if (isActive) Icons.Default.CheckCircle else Icons.Default.Error,
+                    imageVector = icon,
                     contentDescription = null,
                     tint = borderColor,
                     modifier = Modifier.size(24.dp)
@@ -386,18 +466,40 @@ private fun ServiceStatusBanner(
                     )
                 )
             }
+
+            if (isNotificationAccessGranted && !isServiceConnected) {
+                IconButton(
+                    onClick = onForceRebind,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Sync,
+                        contentDescription = "Сбросить и переподключить",
+                        tint = AmberWarning
+                    )
+                }
+            }
         }
     }
 }
 
+private data class StatusBannerState(
+    val status: String,
+    val subText: String,
+    val color: Color,
+    val bg: Color,
+    val icon: androidx.compose.ui.graphics.vector.ImageVector
+)
+
 /**
- * 2 & 3. Action Buttons (ТЗ 4.2 & 4.3)
+ * 2 & 3. Action Buttons (ТЗ 4.2 & 4.3 + Auto-Rebind)
  */
 @Composable
 private fun ActionButtonsSection(
     context: Context,
     isNotificationAccessGranted: Boolean,
-    isBatteryOptIgnored: Boolean
+    isBatteryOptIgnored: Boolean,
+    onForceRebind: () -> Unit
 ) {
     Column(
         verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -475,6 +577,37 @@ private fun ActionButtonsSection(
                 },
                 fontWeight = FontWeight.Medium
             )
+        }
+
+        // Кнопка 3: «Сбросить и переподключить службу» (при наличии прав)
+        if (isNotificationAccessGranted) {
+            OutlinedButton(
+                onClick = onForceRebind,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+                    .testTag("force_rebind_button"),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = ElectricCyan
+                ),
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    ElectricCyan.copy(alpha = 0.5f)
+                ),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Sync,
+                    contentDescription = null,
+                    modifier = Modifier.size(20.dp),
+                    tint = ElectricCyan
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Сбросить и переподключить службу",
+                    fontWeight = FontWeight.Medium
+                )
+            }
         }
     }
 }
@@ -992,18 +1125,7 @@ data class TestApiResult(
 
 // Helpers
 private fun checkNotificationAccess(context: Context): Boolean {
-    val pkgName = context.packageName
-    val flat = Settings.Secure.getString(context.contentResolver, "enabled_notification_listeners")
-    if (!flat.isNullOrEmpty()) {
-        val names = flat.split(":")
-        for (name in names) {
-            val cn = ComponentName.unflattenFromString(name)
-            if (cn != null && cn.packageName == pkgName) {
-                return true
-            }
-        }
-    }
-    return false
+    return NotificationRebindHelper.isNotificationAccessGranted(context)
 }
 
 private fun checkBatteryOptIgnored(context: Context): Boolean {

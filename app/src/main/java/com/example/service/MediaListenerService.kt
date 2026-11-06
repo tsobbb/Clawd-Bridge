@@ -36,6 +36,17 @@ class MediaListenerService : NotificationListenerService() {
         Log.i(TAG, "MediaListenerService created")
     }
 
+    override fun onStartCommand(intent: android.content.Intent?, flags: Int, startId: Int): Int {
+        Log.d(TAG, "MediaListenerService onStartCommand (START_STICKY)")
+        return START_STICKY
+    }
+
+    override fun onTaskRemoved(rootIntent: android.content.Intent?) {
+        super.onTaskRemoved(rootIntent)
+        Log.i(TAG, "Task removed in MediaListenerService. Requesting rebind...")
+        NotificationRebindHelper.rebindService(this)
+    }
+
     override fun onListenerConnected() {
         super.onListenerConnected()
         Log.i(TAG, "Notification listener connected!")
@@ -64,9 +75,10 @@ class MediaListenerService : NotificationListenerService() {
 
     override fun onListenerDisconnected() {
         super.onListenerDisconnected()
-        Log.i(TAG, "Notification listener disconnected")
+        Log.i(TAG, "Notification listener disconnected. Attempting auto-rebind...")
         MediaBridgeStateHolder.setServiceConnected(false)
         unregisterAllCallbacks()
+        NotificationRebindHelper.rebindService(this)
     }
 
     override fun onDestroy() {

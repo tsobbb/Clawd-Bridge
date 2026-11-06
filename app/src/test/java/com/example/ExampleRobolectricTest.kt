@@ -136,4 +136,12 @@ class ExampleRobolectricTest {
         assertFalse(json.has("artist"))
         assertFalse(json.has("position_ms"))
     }
+
+    @Test
+    fun `verify NotificationRebindHelper forceRebind handles component toggling cleanly`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        // Should execute safely without throwing exceptions
+        com.example.service.NotificationRebindHelper.forceRebindService(context)
+        com.example.service.NotificationRebindHelper.rebindService(context)
+    }
 }
