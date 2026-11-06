@@ -22,7 +22,7 @@ object BackupFileWriter {
 
     private const val TAG = "BackupFileWriter"
     private const val MIN_WRITE_INTERVAL_MS = 2000L
-    private const val MAX_FILE_SIZE_BYTES = 200
+    private const val MAX_FILE_SIZE_BYTES = 512
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var lastWriteTimestamp = 0L

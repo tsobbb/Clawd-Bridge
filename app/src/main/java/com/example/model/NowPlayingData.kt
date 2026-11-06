@@ -14,11 +14,13 @@ data class NowPlayingData(
     val durationMs: Long = 0L,
     val positionSec: Double = 0.0,
     val isPlaying: Boolean = false,
+    val positionKnown: Boolean = true,
     val timestamp: Long = System.currentTimeMillis()
 ) {
     /**
-     * Formats JSON response adhering strictly to ТЗ v1.2 specification:
-     * - When music is playing: full JSON with track info and precise sub-millisecond timestamps
+     * Formats JSON response adhering strictly to ТЗ v1.2 & v1.3 specification:
+     * - When music is playing: full JSON with track info, precise sub-millisecond timestamps,
+     *   and "position_known": true|false
      * - When idle or paused: minimal {"has_media": false, "is_playing": false}
      */
     fun toJsonString(): String {
@@ -28,16 +30,16 @@ data class NowPlayingData(
             val safeTitle = escapeJson(title)
             val formattedSec = String.format(Locale.US, "%.2f", positionSec)
 
-            """{"has_media":true,"player":"$safePlayer","artist":"$safeArtist","title":"$safeTitle","position_ms":$positionMs,"duration_ms":$durationMs,"position_sec":$formattedSec,"is_playing":true,"timestamp":$timestamp}"""
+            """{"has_media":true,"player":"$safePlayer","artist":"$safeArtist","title":"$safeTitle","position_ms":$positionMs,"duration_ms":$durationMs,"position_sec":$formattedSec,"is_playing":true,"position_known":$positionKnown,"timestamp":$timestamp}"""
         } else {
             """{"has_media":false,"is_playing":false}"""
         }
     }
 
     /**
-     * Compact JSON strictly <= maxBytes (default 200 bytes) for flash-memory backup (ТЗ 3.4)
+     * Compact JSON strictly <= maxBytes (default 512 bytes per ТЗ v1.3) for flash-memory backup
      */
-    fun toBackupJsonString(maxBytes: Int = 200): String {
+    fun toBackupJsonString(maxBytes: Int = 512): String {
         var str = toJsonString()
         var bytes = str.toByteArray(Charsets.UTF_8)
         if (bytes.size <= maxBytes) return str
@@ -46,15 +48,15 @@ data class NowPlayingData(
         var artistLen = artist.length
         while (bytes.size > maxBytes && (titleLen > 5 || artistLen > 5)) {
             if (titleLen > artistLen) {
-                titleLen -= 2
+                titleLen -= 4
             } else {
-                artistLen -= 2
+                artistLen -= 4
             }
             val safeT = escapeJson(title.take(titleLen))
             val safeA = escapeJson(artist.take(artistLen))
-            val safeP = escapeJson(player.take(30))
+            val safeP = escapeJson(player.take(40))
             val formattedSec = String.format(Locale.US, "%.2f", positionSec)
-            str = """{"has_media":true,"player":"$safeP","artist":"$safeA","title":"$safeT","position_ms":$positionMs,"duration_ms":$durationMs,"position_sec":$formattedSec,"is_playing":true,"timestamp":$timestamp}"""
+            str = """{"has_media":true,"player":"$safeP","artist":"$safeA","title":"$safeT","position_ms":$positionMs,"duration_ms":$durationMs,"position_sec":$formattedSec,"is_playing":true,"position_known":$positionKnown,"timestamp":$timestamp}"""
             bytes = str.toByteArray(Charsets.UTF_8)
         }
         return str
@@ -79,6 +81,7 @@ data class NowPlayingData(
   "duration_ms": $durationMs,
   "position_sec": $formattedSec,
   "is_playing": true,
+  "position_known": $positionKnown,
   "timestamp": $timestamp
 }"""
         } else {
@@ -101,6 +104,6 @@ data class NowPlayingData(
     }
 
     companion object {
-        val IDLE = NowPlayingData(hasMedia = false, isPlaying = false)
+        val IDLE = NowPlayingData(hasMedia = false, isPlaying = false, positionKnown = true)
     }
 }

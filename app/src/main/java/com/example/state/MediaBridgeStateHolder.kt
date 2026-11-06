@@ -5,18 +5,18 @@ import android.media.session.MediaController
 import android.media.session.PlaybackState
 import android.os.SystemClock
 import com.example.model.NowPlayingData
+import com.example.simulator.TestMediaSimulator
 import com.example.storage.BackupFileWriter
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.max
-import kotlin.math.min
 
 /**
  * Thread-safe centralized state manager for media sessions and real-time playback extrapolation.
+ * Adheres strictly to monotonic SystemClock.elapsedRealtime() clock rules (ТЗ v1.3).
  */
 object MediaBridgeStateHolder {
 
@@ -39,7 +39,7 @@ object MediaBridgeStateHolder {
 
     fun setServiceConnected(connected: Boolean) {
         _isServiceConnected.value = connected
-        if (!connected && simulatedState.get() == null) {
+        if (!connected && simulatedState.get() == null && !TestMediaSimulator.isSimulatorActive.value) {
             updateLiveState(NowPlayingData.IDLE)
         }
     }
@@ -62,17 +62,34 @@ object MediaBridgeStateHolder {
     }
 
     /**
-     * Calculates the exact sub-millisecond playback position per ТЗ formula:
-     * currentPos += (timeDelta * state.playbackSpeed).toLong()
+     * Calculates the exact sub-millisecond playback position per ТЗ v1.3 formula:
+     * - Strictly uses SystemClock.elapsedRealtime()
+     * - Coerces position in [0, duration] (or >= 0 if duration <= 0)
+     * - Handles PlaybackState.PLAYBACK_POSITION_UNKNOWN (-1) -> returns 0L to false
      */
-    fun getCurrentPositionMs(state: PlaybackState): Long {
+    fun calculatePosition(state: PlaybackState, duration: Long): Pair<Long, Boolean> {
+        if (state.position == PlaybackState.PLAYBACK_POSITION_UNKNOWN) {
+            return Pair(0L, false)
+        }
+
         var currentPos = state.position
         if (state.state == PlaybackState.STATE_PLAYING) {
-            val timeDelta = SystemClock.elapsedRealtime() - state.lastPositionUpdateTime
+            val timeDelta = (SystemClock.elapsedRealtime() - state.lastPositionUpdateTime).coerceAtLeast(0L)
             val speed = if (state.playbackSpeed > 0f) state.playbackSpeed else 1.0f
             currentPos += (timeDelta * speed).toLong()
         }
-        return max(0L, currentPos)
+
+        val clamped = if (duration > 0) {
+            currentPos.coerceIn(0L, duration)
+        } else {
+            currentPos.coerceAtLeast(0L)
+        }
+
+        return Pair(clamped, true)
+    }
+
+    fun getCurrentPositionMs(state: PlaybackState, duration: Long = 0L): Long {
+        return calculatePosition(state, duration).first
     }
 
     /**
@@ -81,19 +98,31 @@ object MediaBridgeStateHolder {
      */
     fun getCurrentSnapshot(): NowPlayingData {
         // Priority 1: Built-in simulator if active
-        val sim = simulatedState.get()
-        if (sim != null) {
-            val snapshot = if (sim.isPlaying) {
-                val elapsed = SystemClock.elapsedRealtime() - sim.timestamp
-                val currentPos = min(sim.durationMs, sim.positionMs + elapsed)
-                val sec = currentPos / 1000.0
-                sim.copy(
-                    positionMs = currentPos,
+        if (TestMediaSimulator.isSimulatorActive.value) {
+            val isPlaying = TestMediaSimulator.isPlaying.value
+            val snapshot = if (isPlaying) {
+                val pos = TestMediaSimulator.getEstimatedPositionMs()
+                val duration = TestMediaSimulator.durationMs
+                val clampedPos = pos.coerceIn(0L, duration)
+                val sec = clampedPos / 1000.0
+                NowPlayingData(
+                    hasMedia = true,
+                    player = TestMediaSimulator.playerPackage,
+                    artist = TestMediaSimulator.artistName,
+                    title = TestMediaSimulator.trackTitle,
+                    positionMs = clampedPos,
+                    durationMs = duration,
                     positionSec = sec,
+                    isPlaying = true,
+                    positionKnown = true,
                     timestamp = System.currentTimeMillis()
                 )
             } else {
-                sim
+                NowPlayingData(
+                    hasMedia = false,
+                    isPlaying = false,
+                    positionKnown = true
+                )
             }
             updateLiveState(snapshot)
             BackupFileWriter.scheduleWrite(snapshot)
@@ -118,12 +147,9 @@ object MediaBridgeStateHolder {
             }
 
             val metadata = controller.metadata
-            val duration = metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L
+            val duration = (metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L).coerceAtLeast(0L)
 
-            var posMs = getCurrentPositionMs(state)
-            if (duration > 0) {
-                posMs = min(posMs, duration)
-            }
+            val (posMs, positionKnown) = calculatePosition(state, duration)
             val posSec = posMs / 1000.0
 
             val title = metadata?.getString(MediaMetadata.METADATA_KEY_TITLE)
@@ -143,6 +169,7 @@ object MediaBridgeStateHolder {
                 durationMs = duration,
                 positionSec = posSec,
                 isPlaying = true,
+                positionKnown = positionKnown,
                 timestamp = System.currentTimeMillis()
             )
 

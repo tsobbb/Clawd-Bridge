@@ -163,7 +163,7 @@ fun ClawdBridgeScreen(modifier: Modifier = Modifier) {
     var isBatteryOptIgnored by remember { mutableStateOf(checkBatteryOptIgnored(context)) }
 
     // In-app API test response preview
-    var apiTestResult by remember { mutableStateOf<String?>(null) }
+    var apiTestResult by remember { mutableStateOf<TestApiResult?>(null) }
     var isTestingApi by remember { mutableStateOf(false) }
 
     // Re-check permissions when returning to foreground
@@ -766,7 +766,7 @@ private fun HttpServerDiagnosticsCard(
     lastRequestTimestamp: Long,
     onCopyUrl: () -> Unit,
     onTestApi: () -> Unit,
-    apiTestResult: String?,
+    apiTestResult: TestApiResult?,
     isTestingApi: Boolean
 ) {
     Card(
@@ -877,28 +877,34 @@ private fun HttpServerDiagnosticsCard(
                 }
             }
 
-            // Display in-app test result preview
+            // Display in-app test result preview (ТЗ v1.3 requirement: dynamic status, no hardcoded 200, error handling)
             AnimatedVisibility(visible = apiTestResult != null) {
-                Surface(
-                    shape = RoundedCornerShape(10.dp),
-                    color = DarkBackground,
-                    border = androidx.compose.foundation.BorderStroke(1.dp, ElectricCyan.copy(alpha = 0.3f)),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.padding(10.dp)) {
-                        Text(
-                            text = "Ответ сервера (HTTP 200 OK):",
-                            style = MaterialTheme.typography.labelSmall.copy(color = TextSecondary)
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = apiTestResult ?: "",
-                            style = MaterialTheme.typography.bodySmall.copy(
-                                fontFamily = FontFamily.Monospace,
-                                color = NeonEmerald,
-                                fontSize = 11.sp
+                apiTestResult?.let { result ->
+                    val borderColor = if (result.isSuccess) NeonEmerald else CoralRed
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = DarkBackground,
+                        border = androidx.compose.foundation.BorderStroke(1.dp, borderColor.copy(alpha = 0.4f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp)) {
+                            Text(
+                                text = if (result.isSuccess) "Ответ сервера (${result.headerTitle}):" else "Ошибка: ${result.headerTitle}",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    color = if (result.isSuccess) TextSecondary else CoralRed,
+                                    fontWeight = FontWeight.Bold
+                                )
                             )
-                        )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = result.content,
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    fontFamily = FontFamily.Monospace,
+                                    color = if (result.isSuccess) NeonEmerald else CoralRed,
+                                    fontSize = 11.sp
+                                )
+                            )
+                        }
                     }
                 }
             }
@@ -961,7 +967,7 @@ private fun BackupStorageCard(
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Text(
-                    text = "Размер: ${if (fileSize > 0) "$fileSize / 200 байт" else "ожидание"}",
+                    text = "Размер: ${if (fileSize > 0) "$fileSize / 512 байт" else "ожидание"}",
                     style = MaterialTheme.typography.labelSmall.copy(color = TextSecondary)
                 )
 
@@ -976,6 +982,13 @@ private fun BackupStorageCard(
         }
     }
 }
+
+// Data model for structured API test result
+data class TestApiResult(
+    val isSuccess: Boolean,
+    val headerTitle: String,
+    val content: String
+)
 
 // Helpers
 private fun checkNotificationAccess(context: Context): Boolean {
@@ -999,31 +1012,39 @@ private fun checkBatteryOptIgnored(context: Context): Boolean {
 }
 
 private fun formatTimecode(ms: Long): String {
-    val totalSeconds = ms / 1000
+    val safeMs = ms.coerceAtLeast(0L)
+    val totalSeconds = safeMs / 1000
     val minutes = totalSeconds / 60
     val seconds = totalSeconds % 60
-    val hundredths = (ms % 1000) / 10
+    val hundredths = (safeMs % 1000) / 10
     return String.format(Locale.US, "%02d:%02d.%02d", minutes, seconds, hundredths)
 }
 
-private suspend fun testLocalEndpoint(): String = withContext(Dispatchers.IO) {
+/**
+ * Executes test request in background thread with 1500 ms timeouts per ТЗ v1.3 requirement A.5
+ */
+private suspend fun testLocalEndpoint(): TestApiResult = withContext(Dispatchers.IO) {
     try {
         val url = URL("http://127.0.0.1:44444/now-playing")
         val conn = (url.openConnection() as HttpURLConnection).apply {
-            connectTimeout = 2000
-            readTimeout = 2000
+            connectTimeout = 1500
+            readTimeout = 1500
             requestMethod = "GET"
         }
         val code = conn.responseCode
-        if (code == 200) {
-            val reader = BufferedReader(InputStreamReader(conn.inputStream))
-            val text = reader.readText()
-            reader.close()
-            text
-        } else {
-            "HTTP $code: ${conn.responseMessage}"
-        }
+        val msg = conn.responseMessage ?: ""
+        val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+        val text = stream?.bufferedReader()?.use { it.readText() } ?: ""
+        TestApiResult(
+            isSuccess = (code in 200..299),
+            headerTitle = "HTTP $code $msg",
+            content = text
+        )
     } catch (e: Exception) {
-        "Ошибка запроса: ${e.message}"
+        TestApiResult(
+            isSuccess = false,
+            headerTitle = e.message ?: e.toString(),
+            content = "Не удалось связаться с http://127.0.0.1:44444/now-playing. Убедитесь, что служба запущена."
+        )
     }
 }

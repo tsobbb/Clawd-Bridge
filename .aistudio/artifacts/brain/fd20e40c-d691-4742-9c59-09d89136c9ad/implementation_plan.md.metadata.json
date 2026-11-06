@@ -1,6 +1,6 @@
 {
-  "summary": "Implementation plan for Clawd Bridge, an Android Media Sync Service with local HTTP API (127.0.0.1:44444/now-playing), sub-millisecond playback position tracking, notification listener service, atomic disk backup, and Material 3 diagnostics UI with test player.",
-  "updatedAt": "2026-11-06T03:18:59.737214318Z",
+  "summary": "Implementation plan for ТЗ v1.3: fixing Cleartext HTTP traffic to 127.0.0.1 via network_security_config.xml, fixing negative playback position calculation (SystemClock.elapsedRealtime consistency), adding position_known flag, and expanding sync.json limit to 512 bytes.",
+  "updatedAt": "2026-11-06T03:58:01.964305859Z",
   "requestFeedback": true,
   "userFacing": true
 }

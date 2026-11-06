@@ -12,13 +12,14 @@ import kotlin.math.min
 /**
  * Built-in test simulator allowing instant diagnostics and verification
  * in Android emulator environments without external streaming apps.
+ * Operates purely on SystemClock.elapsedRealtime() (ТЗ v1.3).
  */
 object TestMediaSimulator {
 
-    private const val DEFAULT_PLAYER = "com.soundcloud.android"
-    private const val DEFAULT_ARTIST = "Juice WRLD"
-    private const val DEFAULT_TITLE = "Lean Wit Me"
-    private const val DEFAULT_DURATION_MS = 175000L
+    const val playerPackage = "com.soundcloud.android"
+    const val artistName = "Juice WRLD"
+    const val trackTitle = "Lean Wit Me"
+    const val durationMs = 175000L
 
     private val _isSimulatorActive = MutableStateFlow(false)
     val isSimulatorActive: StateFlow<Boolean> = _isSimulatorActive.asStateFlow()
@@ -50,25 +51,25 @@ object TestMediaSimulator {
 
     fun pause() {
         if (_isPlaying.value) {
-            val elapsed = SystemClock.elapsedRealtime() - lastStartTime
-            currentPositionMs = min(DEFAULT_DURATION_MS, currentPositionMs + elapsed)
+            val elapsed = (SystemClock.elapsedRealtime() - lastStartTime).coerceAtLeast(0L)
+            currentPositionMs = (currentPositionMs + elapsed).coerceIn(0L, durationMs)
             _isPlaying.value = false
             syncState()
         }
     }
 
     fun seekTo(positionMs: Long) {
-        currentPositionMs = max(0L, min(DEFAULT_DURATION_MS, positionMs))
+        currentPositionMs = positionMs.coerceIn(0L, durationMs)
         lastStartTime = SystemClock.elapsedRealtime()
         syncState()
     }
 
     fun getEstimatedPositionMs(): Long {
         return if (_isPlaying.value) {
-            val elapsed = SystemClock.elapsedRealtime() - lastStartTime
-            min(DEFAULT_DURATION_MS, currentPositionMs + elapsed)
+            val elapsed = (SystemClock.elapsedRealtime() - lastStartTime).coerceAtLeast(0L)
+            (currentPositionMs + elapsed).coerceIn(0L, durationMs)
         } else {
-            currentPositionMs
+            currentPositionMs.coerceIn(0L, durationMs)
         }
     }
 
@@ -82,19 +83,21 @@ object TestMediaSimulator {
         val data = if (_isPlaying.value) {
             NowPlayingData(
                 hasMedia = true,
-                player = DEFAULT_PLAYER,
-                artist = DEFAULT_ARTIST,
-                title = DEFAULT_TITLE,
+                player = playerPackage,
+                artist = artistName,
+                title = trackTitle,
                 positionMs = pos,
-                durationMs = DEFAULT_DURATION_MS,
+                durationMs = durationMs,
                 positionSec = pos / 1000.0,
                 isPlaying = true,
+                positionKnown = true,
                 timestamp = System.currentTimeMillis()
             )
         } else {
             NowPlayingData(
                 hasMedia = false,
-                isPlaying = false
+                isPlaying = false,
+                positionKnown = true
             )
         }
         MediaBridgeStateHolder.setSimulatedPlayback(data)
