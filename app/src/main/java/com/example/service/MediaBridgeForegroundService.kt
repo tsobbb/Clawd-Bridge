@@ -30,14 +30,6 @@ import kotlinx.coroutines.launch
  */
 class MediaBridgeForegroundService : Service() {
 
-    private companion object {
-        const val TAG = "ForegroundService"
-        const val CHANNEL_ID = "clawd_bridge_foreground_channel"
-        const val CHANNEL_NAME = "Clawd Bridge Background Sync"
-        const val NOTIFICATION_ID = 44444
-        const val WATCHDOG_INTERVAL_MS = 10000L
-    }
-
     private val serviceScope = CoroutineScope(Dispatchers.Default + Job())
     private var watchdogJob: Job? = null
 
@@ -150,6 +142,12 @@ class MediaBridgeForegroundService : Service() {
     }
 
     companion object {
+        private const val TAG = "ForegroundService"
+        private const val CHANNEL_ID = "clawd_bridge_foreground_channel"
+        private const val CHANNEL_NAME = "Clawd Bridge Background Sync"
+        private const val NOTIFICATION_ID = 44444
+        private const val WATCHDOG_INTERVAL_MS = 10000L
+
         fun start(context: Context) {
             try {
                 val intent = Intent(context, MediaBridgeForegroundService::class.java)
