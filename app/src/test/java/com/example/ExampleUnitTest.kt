@@ -1,6 +1,7 @@
 package com.example
 
 import com.example.model.NowPlayingData
+import com.example.plugin.ParsedSource
 import com.example.plugin.PluginDownloader
 import com.example.plugin.RemotePluginFile
 import org.junit.Assert.assertEquals
@@ -106,5 +107,21 @@ class ExampleUnitTest {
     fun `verify PluginDownloader sanitizes unsafe filenames`() {
         assertEquals("clawd v3.4.plugin", PluginDownloader.sanitizeFileName("public/clawd v3.4.plugin"))
         assertEquals("test_file.plugin", PluginDownloader.sanitizeFileName("../test:file.plugin"))
+    }
+
+    @Test
+    fun `verify PluginDownloader parses tree blob repo and direct urls`() {
+        val tree = PluginDownloader.parseSourceUrl("https://github.com/tsobbb/Clawd-plugin/tree/main/public/")
+        assertEquals(ParsedSource.GitHubDirectory("tsobbb", "Clawd-plugin", "main", "public"), tree)
+
+        val blob = PluginDownloader.parseSourceUrl("https://github.com/tsobbb/Clawd-plugin/blob/main/public/clawd.plugin")
+        assertEquals(ParsedSource.GitHubSingleFile("tsobbb", "Clawd-plugin", "main", "public/clawd.plugin"), blob)
+
+        val root = PluginDownloader.parseSourceUrl("https://github.com/tsobbb/Clawd-plugin")
+        assertEquals(ParsedSource.GitHubDirectory("tsobbb", "Clawd-plugin", null, ""), root)
+
+        val direct = PluginDownloader.parseSourceUrl("https://raw.githubusercontent.com/tsobbb/Clawd-plugin/main/public/clawd.plugin")
+        assertTrue(direct is ParsedSource.DirectUrl)
+        assertEquals("clawd.plugin", (direct as ParsedSource.DirectUrl).fileName)
     }
 }
