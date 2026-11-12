@@ -265,7 +265,7 @@ object PluginDownloader {
                 )
             } else {
                 IllegalStateException(
-                    "GitHub 404: репозиторий не найден или он приватный. Если он приватный — добавьте GitHub Token в настройках ниже"
+                    "GitHub 404: репозиторий приватный (если рядом с названием на GitHub есть замок 🔒) или путь не найден. Сделайте его Public в Settings → Danger Zone на GitHub либо укажите Token ниже."
                 )
             }
         } else if (msg.contains("401") || msg.contains("403")) {
@@ -451,19 +451,35 @@ object PluginDownloader {
         }
         val candidates = nonIgnored.ifEmpty { files }
         return candidates.sortedWith(
-            compareByDescending<RemotePluginFile> { it.name.lowercase(Locale.US).endsWith(".plugin") }
+            compareByDescending<RemotePluginFile> { extensionPriority(it.name) }
                 .thenByDescending { it.name.lowercase(Locale.US).contains("clawd") }
                 .thenByDescending { extractVersionKey(it.name) }
                 .thenBy { it.name.lowercase(Locale.US) }
         )
     }
 
+    private fun extensionPriority(name: String): Int {
+        val lower = name.lowercase(Locale.US)
+        return when {
+            lower.endsWith(".plugin") -> 3
+            lower.endsWith(".py") -> 2
+            lower.endsWith(".zip") || lower.endsWith(".js") -> 1
+            else -> 0
+        }
+    }
+
     internal fun extractVersionKey(name: String): Long {
-        val match = Regex("""(\d+)(?:\.(\d+))?(?:\.(\d+))?""").find(name) ?: return 0L
-        val major = match.groupValues.getOrNull(1)?.toLongOrNull() ?: 0L
-        val minor = match.groupValues.getOrNull(2)?.toLongOrNull() ?: 0L
-        val patch = match.groupValues.getOrNull(3)?.toLongOrNull() ?: 0L
-        return major * 1_000_000L + minor * 1_000L + patch
+        val multiPart = Regex("""(?:^|[^0-9])v?(\d+)[._-](\d+)(?:[._-](\d+))?""", RegexOption.IGNORE_CASE)
+            .find(name)
+        if (multiPart != null) {
+            val major = multiPart.groupValues.getOrNull(1)?.toLongOrNull() ?: 0L
+            val minor = multiPart.groupValues.getOrNull(2)?.toLongOrNull() ?: 0L
+            val patch = multiPart.groupValues.getOrNull(3)?.toLongOrNull() ?: 0L
+            return major * 1_000_000L + minor * 1_000L + patch
+        }
+        val single = Regex("""(\d+)""").find(name) ?: return 0L
+        val major = single.groupValues.getOrNull(1)?.toLongOrNull() ?: 0L
+        return major * 1_000_000L
     }
 
     suspend fun downloadPluginToCache(

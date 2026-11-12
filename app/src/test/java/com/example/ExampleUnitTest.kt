@@ -124,4 +124,23 @@ class ExampleUnitTest {
         assertTrue(direct is ParsedSource.DirectUrl)
         assertEquals("clawd.plugin", (direct as ParsedSource.DirectUrl).fileName)
     }
+
+    @Test
+    fun `verify PluginDownloader picks latest underscore py plugin over bridge and kt files`() {
+        val screenshotFiles = listOf(
+            RemotePluginFile("ClawdBridgeService.kt", "https://example.com/ClawdBridgeService.kt", 3000),
+            RemotePluginFile("clawd_bridge.py", "https://example.com/clawd_bridge.py", 4000),
+            RemotePluginFile("clawd_v3_4.py", "https://example.com/clawd_v3_4.py", 5000)
+        )
+        val sortedScreenshot = PluginDownloader.sortAndFilterPlugins(screenshotFiles)
+        assertEquals("clawd_v3_4.py", sortedScreenshot.first().name)
+        assertEquals("ClawdBridgeService.kt", sortedScreenshot.last().name)
+
+        val newerVersions = screenshotFiles + listOf(
+            RemotePluginFile("clawd_v3_5.py", "https://example.com/clawd_v3_5.py", 5100),
+            RemotePluginFile("clawd_v3_10.py", "https://example.com/clawd_v3_10.py", 5200)
+        )
+        val sortedNewer = PluginDownloader.sortAndFilterPlugins(newerVersions)
+        assertEquals("clawd_v3_10.py", sortedNewer.first().name)
+    }
 }
