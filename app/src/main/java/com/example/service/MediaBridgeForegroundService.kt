@@ -19,6 +19,8 @@ import com.example.state.MediaBridgeStateHolder
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -30,7 +32,7 @@ import kotlinx.coroutines.launch
  */
 class MediaBridgeForegroundService : Service() {
 
-    private val serviceScope = CoroutineScope(Dispatchers.Default + Job())
+    private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private var watchdogJob: Job? = null
 
     override fun onCreate() {
@@ -45,12 +47,11 @@ class MediaBridgeForegroundService : Service() {
         // 1. Promote to Foreground Service
         val notification = buildForegroundNotification()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-            } else {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-            }
-            startForeground(NOTIFICATION_ID, notification, type)
+            )
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
@@ -77,6 +78,7 @@ class MediaBridgeForegroundService : Service() {
         super.onDestroy()
         Log.i(TAG, "MediaBridgeForegroundService destroyed")
         watchdogJob?.cancel()
+        serviceScope.cancel()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

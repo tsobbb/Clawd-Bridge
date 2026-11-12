@@ -97,6 +97,7 @@ import com.example.server.LocalHttpServer
 import com.example.simulator.TestMediaSimulator
 import com.example.state.MediaBridgeStateHolder
 import com.example.storage.BackupFileWriter
+import com.example.ui.components.PluginSyncCard
 import com.example.ui.theme.AmberWarning
 import com.example.ui.theme.ClawdBridgeTheme
 import com.example.ui.theme.CoralRed
@@ -320,6 +321,9 @@ fun ClawdBridgeScreen(modifier: Modifier = Modifier) {
             fileSize = backupFileSize,
             status = backupStatus
         )
+
+        // GitHub Plugin Downloader -> Telegram Saved Messages (cache-only)
+        PluginSyncCard(context = context)
 
         Spacer(modifier = Modifier.height(16.dp))
     }
@@ -1124,10 +1128,6 @@ data class TestApiResult(
 )
 
 // Helpers
-private fun checkNotificationAccess(context: Context): Boolean {
-    return NotificationRebindHelper.isNotificationAccessGranted(context)
-}
-
 private fun checkBatteryOptIgnored(context: Context): Boolean {
     val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
     return powerManager?.isIgnoringBatteryOptimizations(context.packageName) ?: false
@@ -1146,9 +1146,10 @@ private fun formatTimecode(ms: Long): String {
  * Executes test request in background thread with 1500 ms timeouts per ТЗ v1.3 requirement A.5
  */
 private suspend fun testLocalEndpoint(): TestApiResult = withContext(Dispatchers.IO) {
+    var conn: HttpURLConnection? = null
     try {
         val url = URL("http://127.0.0.1:44444/now-playing")
-        val conn = (url.openConnection() as HttpURLConnection).apply {
+        conn = (url.openConnection() as HttpURLConnection).apply {
             connectTimeout = 1500
             readTimeout = 1500
             requestMethod = "GET"
@@ -1168,5 +1169,7 @@ private suspend fun testLocalEndpoint(): TestApiResult = withContext(Dispatchers
             headerTitle = e.message ?: e.toString(),
             content = "Не удалось связаться с http://127.0.0.1:44444/now-playing. Убедитесь, что служба запущена."
         )
+    } finally {
+        conn?.disconnect()
     }
 }

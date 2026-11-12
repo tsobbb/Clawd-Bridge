@@ -1,6 +1,8 @@
 package com.example
 
 import com.example.model.NowPlayingData
+import com.example.plugin.PluginDownloader
+import com.example.plugin.RemotePluginFile
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -85,5 +87,24 @@ class ExampleUnitTest {
         val json = dataWithQuotes.toJsonString()
         assertTrue(json.contains("""Artist with \"Quotes\""""))
         assertTrue(json.contains("""Title\nNewline"""))
+    }
+
+    @Test
+    fun `verify PluginDownloader prioritizes latest clawd plugin and filters readme`() {
+        val files = listOf(
+            RemotePluginFile("README.md", "https://example.com/README.md", 100),
+            RemotePluginFile("clawd v3.3.plugin", "https://example.com/3.3", 5000),
+            RemotePluginFile("clawd v3.4.plugin", "https://example.com/3.4", 5200),
+            RemotePluginFile("other_tool.py", "https://example.com/other.py", 1200)
+        )
+        val sorted = PluginDownloader.sortAndFilterPlugins(files)
+        assertEquals(3, sorted.size)
+        assertEquals("clawd v3.4.plugin", sorted.first().name)
+    }
+
+    @Test
+    fun `verify PluginDownloader sanitizes unsafe filenames`() {
+        assertEquals("clawd v3.4.plugin", PluginDownloader.sanitizeFileName("public/clawd v3.4.plugin"))
+        assertEquals("test_file.plugin", PluginDownloader.sanitizeFileName("../test:file.plugin"))
     }
 }

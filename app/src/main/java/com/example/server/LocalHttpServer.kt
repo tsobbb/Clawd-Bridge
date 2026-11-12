@@ -161,7 +161,8 @@ object LocalHttpServer {
     }
 
     private fun sendNotFoundResponse(output: OutputStream, path: String) {
-        val message = """{"error":"Not Found","path":"$path"}"""
+        val safePath = path.replace("\\", "\\\\").replace("\"", "\\\"")
+        val message = """{"error":"Not Found","path":"$safePath"}"""
         val bodyBytes = message.toByteArray(Charsets.UTF_8)
         val header = StringBuilder()
             .append("HTTP/1.1 404 Not Found\r\n")
