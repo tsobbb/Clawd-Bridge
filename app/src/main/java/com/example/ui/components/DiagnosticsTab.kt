@@ -105,6 +105,7 @@ fun DiagnosticsTab(
     lastRequestTimestamp: Long,
     syncOffsetMs: Int,
     onSyncOffsetChange: (Int) -> Unit,
+    artworkDebugStatus: String,
     isFilterEnabled: Boolean,
     ignoredPackages: Set<String>,
     discoveredApps: List<DiscoveredMediaApp>,
@@ -131,6 +132,7 @@ fun DiagnosticsTab(
             requestCount = requestCount,
             activeSseClients = activeSseClients,
             lastRequestTimestamp = lastRequestTimestamp,
+            artworkDebugStatus = artworkDebugStatus,
             onCopyUrl = { urlToCopy ->
                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 val clip = ClipData.newPlainText("Clawd Bridge API", urlToCopy)
@@ -203,6 +205,7 @@ private fun HttpServerDiagnosticsCard(
     requestCount: Long,
     activeSseClients: Int,
     lastRequestTimestamp: Long,
+    artworkDebugStatus: String,
     onCopyUrl: (String) -> Unit,
     onTestNowPlaying: () -> Unit,
     onTestSse: () -> Unit,
@@ -279,6 +282,15 @@ private fun HttpServerDiagnosticsCard(
             EndpointRow(
                 url = "http://127.0.0.1:44444/artwork",
                 onCopy = { onCopyUrl("http://127.0.0.1:44444/artwork") }
+            )
+
+            Text(
+                text = "Обложка: $artworkDebugStatus",
+                style = MaterialTheme.typography.bodySmall.copy(
+                    fontFamily = JetBrainsMonoFontFamily,
+                    color = TextSecondary,
+                    fontSize = 11.sp
+                )
             )
 
             Row(

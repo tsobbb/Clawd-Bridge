@@ -34,8 +34,10 @@ import java.util.concurrent.atomic.AtomicReference
 object MediaBridgeStateHolder {
 
     private data class NotificationArtEntry(
-        val bitmap: Bitmap,
+        val bitmap: Bitmap?,
+        val uriFallback: String?,
         val notifTitle: String,
+        val debugNote: String,
         val revision: Long
     )
 
@@ -55,6 +57,9 @@ object MediaBridgeStateHolder {
     private val _artworkBitmap = MutableStateFlow<Bitmap?>(null)
     val artworkBitmap: StateFlow<Bitmap?> = _artworkBitmap.asStateFlow()
 
+    private val _artworkDebugStatus = MutableStateFlow("Ожидание трека")
+    val artworkDebugStatus: StateFlow<String> = _artworkDebugStatus.asStateFlow()
+
     @Volatile
     private var currentArtworkBytes: ByteArray? = null
 
@@ -70,10 +75,13 @@ object MediaBridgeStateHolder {
     private var cachedExtractedArtwork: ExtractedArtwork? = null
 
     @Volatile
-    private var lastAttemptedArtUri: String = ""
+    private var lastAttemptedUriKey: String = ""
 
     @Volatile
-    private var inFlightArtUriKey: String = ""
+    private var inFlightArtKey: String = ""
+
+    @Volatile
+    private var catalogFallbackAttemptedKey: String = ""
 
     private val notificationArtMap = ConcurrentHashMap<String, NotificationArtEntry>()
     private val notificationArtRevision = AtomicLong(0L)
@@ -143,14 +151,18 @@ object MediaBridgeStateHolder {
         controller: MediaController?,
         forcePush: Boolean = true,
         notificationArtBitmap: Bitmap? = null,
-        notificationTitle: String = ""
+        notificationArtUri: String? = null,
+        notificationTitle: String = "",
+        notificationDebugNote: String = ""
     ) {
         val pkg = controller?.packageName
-        if (!pkg.isNullOrBlank() && notificationArtBitmap != null && !notificationArtBitmap.isRecycled) {
+        if (!pkg.isNullOrBlank() && (notificationArtBitmap != null || !notificationArtUri.isNullOrBlank() || notificationDebugNote.isNotBlank())) {
             val rev = notificationArtRevision.incrementAndGet()
             notificationArtMap[pkg] = NotificationArtEntry(
-                bitmap = notificationArtBitmap,
+                bitmap = notificationArtBitmap?.takeIf { !it.isRecycled },
+                uriFallback = notificationArtUri,
                 notifTitle = notificationTitle,
+                debugNote = notificationDebugNote,
                 revision = rev
             )
         }
@@ -158,12 +170,22 @@ object MediaBridgeStateHolder {
         refreshSnapshot(forcePush = forcePush)
     }
 
-    fun updateNotificationArtwork(packageName: String, notifTitle: String, bitmap: Bitmap) {
-        if (packageName.isBlank() || bitmap.isRecycled) return
+    fun updateNotificationArtwork(
+        packageName: String,
+        notifTitle: String,
+        bitmap: Bitmap?,
+        uriFallback: String?,
+        debugNote: String
+    ) {
+        if (packageName.isBlank()) return
+        val validBmp = bitmap?.takeIf { !it.isRecycled }
+        if (validBmp == null && uriFallback.isNullOrBlank()) return
         val rev = notificationArtRevision.incrementAndGet()
         notificationArtMap[packageName] = NotificationArtEntry(
-            bitmap = bitmap,
+            bitmap = validBmp,
+            uriFallback = uriFallback,
             notifTitle = notifTitle,
+            debugNote = debugNote,
             revision = rev
         )
         val currentPkg = activeController.get()?.packageName
@@ -186,12 +208,6 @@ object MediaBridgeStateHolder {
 
     fun getCurrentArtworkBytes(): ByteArray? = currentArtworkBytes
 
-    /**
-     * Calculates the exact sub-millisecond playback position per ТЗ v1.3 formula:
-     * - Strictly uses SystemClock.elapsedRealtime()
-     * - Coerces position in [0, duration] (or >= 0 if duration <= 0)
-     * - Handles PlaybackState.PLAYBACK_POSITION_UNKNOWN (-1) -> returns 0L to false
-     */
     fun calculatePosition(state: PlaybackState, duration: Long): Pair<Long, Boolean> {
         if (state.position == PlaybackState.PLAYBACK_POSITION_UNKNOWN) {
             return Pair(0L, false)
@@ -217,10 +233,6 @@ object MediaBridgeStateHolder {
         return calculatePosition(state, duration).first
     }
 
-    /**
-     * Produces a real-time snapshot of the current media playback.
-     * Evaluates dynamic position at the exact moment of execution.
-     */
     fun getCurrentSnapshot(forcePush: Boolean = false): NowPlayingData {
         // Priority 1: Built-in simulator if active
         if (TestMediaSimulator.isSimulatorActive.value) {
@@ -345,6 +357,7 @@ object MediaBridgeStateHolder {
             cachedExtractedArtwork = created
             currentArtworkBytes = created.jpegBytes
             _artworkBitmap.value = created.thumbnail
+            _artworkDebugStatus.value = "Simulator gradient"
             return created
         }
     }
@@ -358,20 +371,20 @@ object MediaBridgeStateHolder {
     ): ExtractedArtwork? {
         val trackKey = "$packageName|$artist|$title|$album"
         val inlineBitmap = ArtworkExtractor.extractInlineBitmap(metadata)
-        val artUri = ArtworkExtractor.extractArtworkUri(metadata)
+        val metaArtUri = ArtworkExtractor.extractArtworkUri(metadata)
         val notifEntry = notificationArtMap[packageName]?.takeIf { entry ->
-            !entry.bitmap.isRecycled &&
-                (entry.notifTitle.isBlank() || title.isBlank() ||
-                    entry.notifTitle.equals(title, ignoreCase = true) ||
-                    title.contains(entry.notifTitle, ignoreCase = true) ||
-                    entry.notifTitle.contains(title, ignoreCase = true))
+            (entry.notifTitle.isBlank() || title.isBlank() ||
+                entry.notifTitle.equals(title, ignoreCase = true) ||
+                title.contains(entry.notifTitle, ignoreCase = true) ||
+                entry.notifTitle.contains(title, ignoreCase = true))
         }
+        val effectiveUri = metaArtUri ?: notifEntry?.uriFallback
 
         val sourceKey = when {
             inlineBitmap != null -> "$trackKey|inline|${inlineBitmap.generationId}"
-            notifEntry != null -> "$trackKey|notif|${notifEntry.revision}"
-            !artUri.isNullOrBlank() -> "$trackKey|uri|$artUri"
-            else -> "$trackKey|none"
+            notifEntry?.bitmap != null -> "$trackKey|notif|${notifEntry.revision}"
+            !effectiveUri.isNullOrBlank() -> "$trackKey|uri|$effectiveUri"
+            else -> "$trackKey|catalog"
         }
 
         synchronized(artworkLock) {
@@ -379,47 +392,71 @@ object MediaBridgeStateHolder {
                 cachedTrackKey = trackKey
                 cachedArtworkSourceKey = ""
                 cachedExtractedArtwork = null
-                lastAttemptedArtUri = ""
-                inFlightArtUriKey = ""
-            } else if (cachedArtworkSourceKey == sourceKey && cachedExtractedArtwork != null) {
+                lastAttemptedUriKey = ""
+                inFlightArtKey = ""
+                catalogFallbackAttemptedKey = ""
+            } else if (cachedExtractedArtwork != null && (cachedArtworkSourceKey == sourceKey || inlineBitmap == null && notifEntry?.bitmap == null)) {
                 return cachedExtractedArtwork
             }
 
-            // 1. Inline MediaMetadata Bitmap (fastest & highest fidelity)
+            // 1. Inline MediaMetadata Bitmap
             if (inlineBitmap != null) {
                 val extracted = ArtworkExtractor.fromBitmap(inlineBitmap)
                 if (extracted != null) {
-                    applyResolvedArtworkLocked(trackKey, sourceKey, extracted)
+                    applyResolvedArtworkLocked(trackKey, sourceKey, extracted, "MediaMetadata Bitmap")
                     return extracted
                 }
             }
 
-            // 2. Notification MediaStyle Icon/Bitmap (SystemUI source, handles SoundCloud/Spotify/etc.)
-            if (notifEntry != null) {
-                val extracted = ArtworkExtractor.fromBitmap(notifEntry.bitmap)
+            // 2. Notification MediaStyle Icon / Bitmap
+            val notifBmp = notifEntry?.bitmap?.takeIf { !it.isRecycled }
+            if (notifBmp != null) {
+                val extracted = ArtworkExtractor.fromBitmap(notifBmp)
                 if (extracted != null) {
-                    applyResolvedArtworkLocked(trackKey, sourceKey, extracted)
+                    applyResolvedArtworkLocked(trackKey, sourceKey, extracted, notifEntry.debugNote)
                     return extracted
                 }
             }
 
-            // 3. Async URI fallback (content://, file://, or https:// from METADATA_KEY_ALBUM_ART_URI / ART_URI)
+            // 3. Async URI (content://, file://, https://) + Public Catalog Fallback
             val ctx = appContext
-            if (ctx != null && !artUri.isNullOrBlank()) {
-                val uriRequestKey = "$trackKey|$artUri"
-                if (cachedExtractedArtwork != null && lastAttemptedArtUri == artUri) {
-                    return cachedExtractedArtwork
-                }
-                if (lastAttemptedArtUri != artUri && inFlightArtUriKey != uriRequestKey) {
-                    inFlightArtUriKey = uriRequestKey
-                    lastAttemptedArtUri = artUri
-                    fetchArtworkFromUriAsync(ctx, trackKey, sourceKey, artUri, uriRequestKey)
+            if (ctx != null && !effectiveUri.isNullOrBlank()) {
+                val uriRequestKey = "$trackKey|$effectiveUri"
+                if (lastAttemptedUriKey != uriRequestKey && inFlightArtKey != uriRequestKey) {
+                    inFlightArtKey = uriRequestKey
+                    lastAttemptedUriKey = uriRequestKey
+                    _artworkDebugStatus.value = "Загрузка URI (${effectiveUri.substringBefore(':')}...)"
+                    fetchArtworkAsync(
+                        context = ctx,
+                        trackKey = trackKey,
+                        sourceKey = sourceKey,
+                        artUri = effectiveUri,
+                        artist = artist,
+                        title = title,
+                        requestKey = uriRequestKey,
+                        metaSummary = ArtworkExtractor.summarizeMetadataKeys(metadata),
+                        notifDebug = notifEntry?.debugNote ?: "notif=none"
+                    )
                 }
                 return cachedExtractedArtwork
             }
 
-            // Nothing found synchronously and no URI left to load
-            if (cachedExtractedArtwork == null) {
+            // 4. Local sources all absent/unreadable -> try Public Catalog Fallback once per track
+            if (ctx != null && catalogFallbackAttemptedKey != trackKey && inFlightArtKey != trackKey && (artist.isNotBlank() || title.isNotBlank())) {
+                catalogFallbackAttemptedKey = trackKey
+                inFlightArtKey = trackKey
+                val metaSummary = ArtworkExtractor.summarizeMetadataKeys(metadata)
+                val notifSummary = notifEntry?.debugNote ?: "notif=none"
+                _artworkDebugStatus.value = "Поиск обложки ($metaSummary; $notifSummary)"
+                fetchCatalogFallbackAsync(
+                    trackKey = trackKey,
+                    sourceKey = sourceKey,
+                    artist = artist,
+                    title = title,
+                    metaSummary = metaSummary,
+                    notifSummary = notifSummary
+                )
+            } else if (cachedExtractedArtwork == null && inFlightArtKey.isBlank()) {
                 cachedArtworkSourceKey = sourceKey
                 currentArtworkBytes = null
                 _artworkBitmap.value = null
@@ -431,32 +468,86 @@ object MediaBridgeStateHolder {
     private fun applyResolvedArtworkLocked(
         trackKey: String,
         sourceKey: String,
-        extracted: ExtractedArtwork
+        extracted: ExtractedArtwork,
+        debugNote: String
     ) {
         cachedTrackKey = trackKey
         cachedArtworkSourceKey = sourceKey
         cachedExtractedArtwork = extracted
         currentArtworkBytes = extracted.jpegBytes
         _artworkBitmap.value = extracted.thumbnail
+        _artworkDebugStatus.value = debugNote
     }
 
-    private fun fetchArtworkFromUriAsync(
+    private fun fetchArtworkAsync(
         context: Context,
         trackKey: String,
         sourceKey: String,
         artUri: String,
-        uriRequestKey: String
+        artist: String,
+        title: String,
+        requestKey: String,
+        metaSummary: String,
+        notifDebug: String
     ) {
         ioScope.launch {
-            val loaded = ArtworkExtractor.loadFromUri(context, artUri)
+            val uriRes = ArtworkExtractor.loadFromUriDetailed(context, artUri)
+            var finalArtwork = uriRes.artwork
+            var finalNote = uriRes.debugNote
+
+            if (finalArtwork == null && (artist.isNotBlank() || title.isNotBlank())) {
+                val catalogRes = ArtworkExtractor.fetchPublicCatalogArtwork(artist, title)
+                if (catalogRes.artwork != null) {
+                    finalArtwork = catalogRes.artwork
+                    finalNote = "${catalogRes.debugNote} (после ${uriRes.debugNote})"
+                } else {
+                    finalNote = "${uriRes.debugNote}; ${catalogRes.debugNote}; $metaSummary; $notifDebug"
+                }
+            }
+
             var shouldRefresh = false
             synchronized(artworkLock) {
-                if (inFlightArtUriKey == uriRequestKey) {
-                    inFlightArtUriKey = ""
+                if (inFlightArtKey == requestKey) {
+                    inFlightArtKey = ""
                 }
-                if (cachedTrackKey == trackKey && loaded != null) {
-                    applyResolvedArtworkLocked(trackKey, sourceKey, loaded)
-                    shouldRefresh = true
+                if (cachedTrackKey == trackKey) {
+                    if (finalArtwork != null) {
+                        applyResolvedArtworkLocked(trackKey, sourceKey, finalArtwork, finalNote)
+                        shouldRefresh = true
+                    } else {
+                        _artworkDebugStatus.value = finalNote
+                    }
+                }
+            }
+            if (shouldRefresh) {
+                refreshSnapshot(forcePush = true)
+            }
+        }
+    }
+
+    private fun fetchCatalogFallbackAsync(
+        trackKey: String,
+        sourceKey: String,
+        artist: String,
+        title: String,
+        metaSummary: String,
+        notifSummary: String
+    ) {
+        ioScope.launch {
+            val catalogRes = ArtworkExtractor.fetchPublicCatalogArtwork(artist, title)
+            var shouldRefresh = false
+            synchronized(artworkLock) {
+                if (inFlightArtKey == trackKey) {
+                    inFlightArtKey = ""
+                }
+                if (cachedTrackKey == trackKey) {
+                    val art = catalogRes.artwork
+                    if (art != null) {
+                        applyResolvedArtworkLocked(trackKey, sourceKey, art, "${catalogRes.debugNote} ($metaSummary; $notifSummary)")
+                        shouldRefresh = true
+                    } else {
+                        _artworkDebugStatus.value = "${catalogRes.debugNote} ($metaSummary; $notifSummary)"
+                    }
                 }
             }
             if (shouldRefresh) {
@@ -471,10 +562,12 @@ object MediaBridgeStateHolder {
                 cachedTrackKey = ""
                 cachedArtworkSourceKey = ""
                 cachedExtractedArtwork = null
-                lastAttemptedArtUri = ""
-                inFlightArtUriKey = ""
+                lastAttemptedUriKey = ""
+                inFlightArtKey = ""
+                catalogFallbackAttemptedKey = ""
                 currentArtworkBytes = null
                 _artworkBitmap.value = null
+                _artworkDebugStatus.value = "Ожидание трека"
             }
         }
     }

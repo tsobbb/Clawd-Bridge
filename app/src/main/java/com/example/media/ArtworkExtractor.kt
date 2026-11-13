@@ -6,6 +6,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.ImageDecoder
 import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Rect
@@ -17,10 +18,12 @@ import android.media.MediaMetadata
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.min
@@ -34,12 +37,25 @@ data class ExtractedArtwork(
     val accentColorsHex: List<String>
 )
 
+data class NotificationArtProbe(
+    val bitmap: Bitmap?,
+    val uriFallback: String?,
+    val debugNote: String
+)
+
+data class UriArtLoadResult(
+    val artwork: ExtractedArtwork?,
+    val debugNote: String
+)
+
 object ArtworkExtractor {
 
     private const val ARTWORK_SIZE_PX = 160
     private const val MAX_DECODE_DIMENSION = 512
     private const val MAX_REMOTE_IMAGE_BYTES = 5 * 1024 * 1024
     private const val JPEG_QUALITY = 84
+    private const val BROWSER_USER_AGENT =
+        "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
     private const val DEFAULT_ACCENT_INT = 0xFF00E5FF.toInt()
     private val DEFAULT_PALETTE_INTS = listOf(0xFF00E5FF.toInt(), 0xFF3B82F6.toInt(), 0xFF7C3AED.toInt())
 
@@ -52,14 +68,51 @@ object ArtworkExtractor {
     }
 
     /**
-     * Returns any inline Bitmap attached directly inside MediaMetadata.
+     * Returns any inline Bitmap attached directly inside MediaMetadata (checks standard + custom art keys).
      */
     fun extractInlineBitmap(metadata: MediaMetadata?): Bitmap? {
         if (metadata == null) return null
-        val candidate = metadata.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
-            ?: metadata.getBitmap(MediaMetadata.METADATA_KEY_ART)
-            ?: metadata.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON)
-        return candidate?.takeIf { !it.isRecycled && it.width > 0 && it.height > 0 }
+        val standardKeys = listOf(
+            MediaMetadata.METADATA_KEY_ALBUM_ART,
+            MediaMetadata.METADATA_KEY_ART,
+            MediaMetadata.METADATA_KEY_DISPLAY_ICON
+        )
+        for (key in standardKeys) {
+            val candidate = safeGetBitmap(metadata, key)
+            if (isValidCoverBitmap(candidate)) return candidate
+        }
+
+        // Check MediaDescription iconBitmap
+        val descBmp = try {
+            metadata.description?.iconBitmap
+        } catch (_: Throwable) {
+            null
+        }
+        if (isValidCoverBitmap(descBmp)) return descBmp
+
+        // Check any custom art/icon keys present in MediaMetadata
+        val allKeys = try {
+            metadata.keySet()
+        } catch (_: Throwable) {
+            emptySet()
+        }
+        for (key in allKeys) {
+            val lower = key.lowercase(Locale.US)
+            if (lower.contains("art") || lower.contains("icon") || lower.contains("thumb") || lower.contains("cover") || lower.contains("image")) {
+                val candidate = safeGetBitmap(metadata, key)
+                if (isValidCoverBitmap(candidate)) return candidate
+            }
+        }
+        return null
+    }
+
+    @Suppress("DEPRECATION")
+    private fun safeGetBitmap(metadata: MediaMetadata, key: String): Bitmap? {
+        return try {
+            metadata.getBitmap(key)
+        } catch (_: Throwable) {
+            null
+        }
     }
 
     /**
@@ -73,66 +126,173 @@ object ArtworkExtractor {
             MediaMetadata.METADATA_KEY_DISPLAY_ICON_URI
         )
         for (key in keys) {
-            val value = metadata.getString(key)?.trim()
-            if (!value.isNullOrEmpty()) return value
+            val value = safeGetString(metadata, key)
+            if (!value.isNullOrBlank()) return value
+        }
+
+        val descUri = try {
+            metadata.description?.iconUri?.toString()?.trim()
+        } catch (_: Throwable) {
+            null
+        }
+        if (!descUri.isNullOrBlank()) return descUri
+
+        val allKeys = try {
+            metadata.keySet()
+        } catch (_: Throwable) {
+            emptySet()
+        }
+        for (key in allKeys) {
+            val lower = key.lowercase(Locale.US)
+            if (lower.contains("art") || lower.contains("icon") || lower.contains("thumb") || lower.contains("cover") || lower.contains("image")) {
+                val value = safeGetString(metadata, key)
+                if (!value.isNullOrBlank() && (value.contains("://") || value.startsWith("/"))) {
+                    return value
+                }
+            }
         }
         return null
     }
 
+    private fun safeGetString(metadata: MediaMetadata, key: String): String? {
+        return try {
+            metadata.getString(key)?.trim()
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    fun summarizeMetadataKeys(metadata: MediaMetadata?): String {
+        if (metadata == null) return "meta=null"
+        return try {
+            val keys = metadata.keySet()
+            val artKeys = keys.filter {
+                val l = it.lowercase(Locale.US)
+                l.contains("art") || l.contains("icon") || l.contains("thumb") || l.contains("cover") || l.contains("uri")
+            }
+            if (artKeys.isEmpty()) "metaKeys(${keys.size})=none"
+            else "metaArtKeys=${artKeys.joinToString(",") { it.substringAfterLast('.') }}"
+        } catch (_: Throwable) {
+            "metaKeys=err"
+        }
+    }
+
     /**
-     * Extracts album artwork Bitmap from an active MediaStyle / Transport Notification.
-     * Android SystemUI uses this exact icon for the lockscreen & shade player card.
+     * Extracts album artwork Bitmap or fallback URI from an active Notification.
      */
-    fun extractBitmapFromNotification(context: Context, notification: Notification?): Bitmap? {
-        if (notification == null) return null
+    fun probeBitmapFromNotification(context: Context, notification: Notification?): NotificationArtProbe {
+        if (notification == null) return NotificationArtProbe(null, null, "notif=null")
+        val notes = mutableListOf<String>()
+        var fallbackUri: String? = null
 
         // 1. Check Notification.getLargeIcon() (API 23+)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             val largeIcon = notification.getLargeIcon()
-            val fromLargeIcon = iconToBitmap(context, largeIcon)
-            if (isValidCoverBitmap(fromLargeIcon)) return fromLargeIcon
+            if (largeIcon != null) {
+                val iconRes = extractFromIcon(context, largeIcon, "largeIcon")
+                if (isValidCoverBitmap(iconRes.bitmap)) {
+                    return NotificationArtProbe(iconRes.bitmap, null, "notif:largeIcon")
+                }
+                if (iconRes.uriFallback != null && fallbackUri == null) {
+                    fallbackUri = iconRes.uriFallback
+                }
+                notes.add(iconRes.debugNote)
+            }
         }
 
-        // 2. Check legacy & BigPicture / LargeIcon extras
-        val extras: Bundle = notification.extras ?: return null
-        val bitmapOrIconKeys = listOf(
-            Notification.EXTRA_PICTURE,
-            Notification.EXTRA_LARGE_ICON_BIG,
-            Notification.EXTRA_LARGE_ICON
+        // 2. Check extras (known keys + any extra Bitmap/Icon/URI)
+        val extras: Bundle? = notification.extras
+        if (extras != null) {
+            val priorityKeys = listOf(
+                Notification.EXTRA_PICTURE,
+                Notification.EXTRA_LARGE_ICON_BIG,
+                Notification.EXTRA_LARGE_ICON,
+                Notification.EXTRA_BACKGROUND_IMAGE_URI
+            )
+            for (key in priorityKeys) {
+                val res = extractFromBundleKey(context, extras, key)
+                if (isValidCoverBitmap(res.bitmap)) {
+                    return NotificationArtProbe(res.bitmap, null, "notif:${key.substringAfterLast('.')}")
+                }
+                if (res.uriFallback != null && fallbackUri == null) {
+                    fallbackUri = res.uriFallback
+                }
+                if (res.debugNote.isNotEmpty()) notes.add(res.debugNote)
+            }
+
+            for (key in extras.keySet()) {
+                if (key in priorityKeys || key == Notification.EXTRA_SMALL_ICON) continue
+                val res = extractFromBundleKey(context, extras, key)
+                if (isValidCoverBitmap(res.bitmap)) {
+                    return NotificationArtProbe(res.bitmap, null, "notif:${key.substringAfterLast('.')}")
+                }
+                if (res.uriFallback != null && fallbackUri == null) {
+                    fallbackUri = res.uriFallback
+                }
+            }
+        }
+
+        return NotificationArtProbe(
+            bitmap = null,
+            uriFallback = fallbackUri,
+            debugNote = if (notes.isEmpty()) "notif=empty" else notes.joinToString(";")
         )
-        for (key in bitmapOrIconKeys) {
-            val bmp = getExtraBitmap(context, extras, key)
-            if (isValidCoverBitmap(bmp)) return bmp
-        }
+    }
 
-        return null
+    fun extractBitmapFromNotification(context: Context, notification: Notification?): Bitmap? {
+        return probeBitmapFromNotification(context, notification).bitmap
     }
 
     @Suppress("DEPRECATION")
-    private fun getExtraBitmap(context: Context, extras: Bundle, key: String): Bitmap? {
+    private fun extractFromBundleKey(context: Context, extras: Bundle, key: String): NotificationArtProbe {
         return try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                extras.getParcelable(key, Bitmap::class.java)
-                    ?: iconToBitmap(context, extras.getParcelable(key, Icon::class.java))
-            } else {
-                when (val raw = extras.getParcelable<android.os.Parcelable>(key)) {
-                    is Bitmap -> raw
-                    is Icon -> iconToBitmap(context, raw)
-                    else -> null
+            val raw = extras.get(key) ?: return NotificationArtProbe(null, null, "")
+            when (raw) {
+                is Bitmap -> {
+                    if (isValidCoverBitmap(raw)) NotificationArtProbe(raw, null, "$key:bmp")
+                    else NotificationArtProbe(null, null, "$key:small(${raw.width}x${raw.height})")
                 }
+                is Icon -> extractFromIcon(context, raw, key.substringAfterLast('.'))
+                is Uri -> NotificationArtProbe(null, raw.toString(), "$key:uri")
+                is String -> {
+                    if (raw.startsWith("http://") || raw.startsWith("https://") || raw.startsWith("content://") || raw.startsWith("file://")) {
+                        NotificationArtProbe(null, raw, "$key:strUri")
+                    } else {
+                        NotificationArtProbe(null, null, "")
+                    }
+                }
+                else -> NotificationArtProbe(null, null, "")
             }
-        } catch (_: Throwable) {
-            null
+        } catch (t: Throwable) {
+            NotificationArtProbe(null, null, "$key:${t.javaClass.simpleName}")
         }
     }
 
-    private fun iconToBitmap(context: Context, icon: Icon?): Bitmap? {
-        if (icon == null) return null
+    private fun extractFromIcon(context: Context, icon: Icon, tag: String): NotificationArtProbe {
+        var uriString: String? = null
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            try {
+                val type = icon.type
+                if (type == Icon.TYPE_URI || type == Icon.TYPE_URI_ADAPTIVE_BITMAP) {
+                    uriString = icon.uri.toString()
+                }
+            } catch (_: Throwable) {}
+        }
+
         return try {
-            val drawable = icon.loadDrawable(context) ?: return null
-            drawableToSoftwareBitmap(drawable)
-        } catch (_: Throwable) {
-            null
+            val drawable = icon.loadDrawable(context)
+            if (drawable == null) {
+                NotificationArtProbe(null, uriString, "$tag:loadDrawable=null")
+            } else {
+                val bmp = drawableToSoftwareBitmap(drawable)
+                if (isValidCoverBitmap(bmp)) {
+                    NotificationArtProbe(bmp, null, "$tag:ok")
+                } else {
+                    NotificationArtProbe(null, uriString, "$tag:small")
+                }
+            }
+        } catch (t: Throwable) {
+            NotificationArtProbe(null, uriString, "$tag:${t.javaClass.simpleName}")
         }
     }
 
@@ -162,45 +322,175 @@ object ArtworkExtractor {
      * Loads and extracts artwork asynchronously from content://, file://, android.resource://, or http(s):// URIs.
      * Must be called off the main thread.
      */
-    fun loadFromUri(context: Context, uriString: String): ExtractedArtwork? {
-        val bytes = readUriBytes(context, uriString) ?: return null
-        if (bytes.isEmpty()) return null
-        val decoded = decodeSampledBitmap(bytes, MAX_DECODE_DIMENSION) ?: return null
-        return fromBitmap(decoded)
-    }
-
-    private fun readUriBytes(context: Context, uriString: String): ByteArray? {
+    fun loadFromUriDetailed(context: Context, uriString: String): UriArtLoadResult {
         val lower = uriString.lowercase(Locale.US)
-        return if (lower.startsWith("http://") || lower.startsWith("https://")) {
-            downloadHttpBytes(uriString)
-        } else {
-            try {
-                val uri = Uri.parse(uriString)
-                context.contentResolver.openInputStream(uri)?.use { stream ->
-                    readLimitedBytes(stream, MAX_REMOTE_IMAGE_BYTES)
-                }
-            } catch (_: Throwable) {
-                null
+        if (lower.startsWith("http://") || lower.startsWith("https://")) {
+            val candidates = if (lower.startsWith("http://")) {
+                listOf("https://" + uriString.substring(7), uriString)
+            } else {
+                listOf(uriString)
             }
+            var lastNote = "http:fail"
+            for (urlCandidate in candidates) {
+                val (bytes, note) = downloadHttpBytes(urlCandidate)
+                lastNote = note
+                if (bytes != null && bytes.isNotEmpty()) {
+                    val decoded = decodeSampledBitmap(bytes, MAX_DECODE_DIMENSION)
+                    val extracted = decoded?.let { fromBitmap(it) }
+                    if (extracted != null) {
+                        return UriArtLoadResult(extracted, "uri:http ok (${bytes.size}B)")
+                    }
+                    lastNote = "http:decode_null(${bytes.size}B)"
+                }
+            }
+            return UriArtLoadResult(null, lastNote)
+        }
+
+        // Local URI: content://, file://, android.resource://
+        return try {
+            val uri = Uri.parse(uriString)
+            val streamBytes = context.contentResolver.openInputStream(uri)?.use { stream ->
+                readLimitedBytes(stream, MAX_REMOTE_IMAGE_BYTES)
+            }
+            if (streamBytes != null && streamBytes.isNotEmpty()) {
+                val decoded = decodeSampledBitmap(streamBytes, MAX_DECODE_DIMENSION)
+                val extracted = decoded?.let { fromBitmap(it) }
+                if (extracted != null) {
+                    return UriArtLoadResult(extracted, "uri:content ok")
+                }
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                val source = ImageDecoder.createSource(context.contentResolver, uri)
+                val bmp = ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
+                    decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                    val maxEdge = maxOf(info.size.width, info.size.height)
+                    if (maxEdge > MAX_DECODE_DIMENSION) {
+                        val scale = MAX_DECODE_DIMENSION.toFloat() / maxEdge.toFloat()
+                        decoder.setTargetSize(
+                            (info.size.width * scale).toInt().coerceAtLeast(1),
+                            (info.size.height * scale).toInt().coerceAtLeast(1)
+                        )
+                    }
+                }
+                val extracted = fromBitmap(bmp)
+                if (extracted != null) {
+                    return UriArtLoadResult(extracted, "uri:imageDecoder ok")
+                }
+            }
+            UriArtLoadResult(null, "uri:local empty")
+        } catch (t: Throwable) {
+            UriArtLoadResult(null, "uri:${t.javaClass.simpleName}")
         }
     }
 
-    private fun downloadHttpBytes(urlString: String): ByteArray? {
+    /**
+     * Public music cover fallback used ONLY when local MediaMetadata and Notification
+     * provide no readable bitmap/URI (for example when a player blocks cross-app content:// grants).
+     */
+    fun fetchPublicCatalogArtwork(artist: String, title: String): UriArtLoadResult {
+        val cleanTitle = cleanTrackQuery(title)
+        val cleanArtist = cleanTrackQuery(artist)
+        val query = listOf(cleanArtist, cleanTitle).filter { it.isNotBlank() }.joinToString(" ").trim()
+        if (query.isBlank()) return UriArtLoadResult(null, "fallback:empty_query")
+
+        // 1. Try Deezer public track search API
+        val deezerResult = queryDeezerArtworkUrl(query)
+        if (deezerResult != null) {
+            val (bytes, httpNote) = downloadHttpBytes(deezerResult)
+            if (bytes != null && bytes.isNotEmpty()) {
+                val decoded = decodeSampledBitmap(bytes, MAX_DECODE_DIMENSION)
+                val extracted = decoded?.let { fromBitmap(it) }
+                if (extracted != null) {
+                    return UriArtLoadResult(extracted, "fallback:deezer ok")
+                }
+            } else {
+                // Continue to iTunes on image failure
+                val _unused = httpNote
+            }
+        }
+
+        // 2. Try iTunes Search API
+        val itunesUrl = queryItunesArtworkUrl(query)
+        if (itunesUrl != null) {
+            val (bytes, _) = downloadHttpBytes(itunesUrl)
+            if (bytes != null && bytes.isNotEmpty()) {
+                val decoded = decodeSampledBitmap(bytes, MAX_DECODE_DIMENSION)
+                val extracted = decoded?.let { fromBitmap(it) }
+                if (extracted != null) {
+                    return UriArtLoadResult(extracted, "fallback:itunes ok")
+                }
+            }
+        }
+
+        return UriArtLoadResult(null, "fallback:not_found")
+    }
+
+    private fun cleanTrackQuery(raw: String): String {
+        return raw
+            .replace(Regex("""\[[^\]]*]"""), " ")
+            .replace(Regex("""\((feat\.|ft\.|prod\.|official|audio|video)[^)]*\)""", RegexOption.IGNORE_CASE), " ")
+            .replace(Regex("""\s+"""), " ")
+            .trim()
+    }
+
+    private fun queryDeezerArtworkUrl(query: String): String? {
+        return try {
+            val encoded = URLEncoder.encode(query, "UTF-8")
+            val (bytes, _) = downloadHttpBytes("https://api.deezer.com/search?q=$encoded&limit=1")
+            if (bytes == null) return null
+            val root = JSONObject(String(bytes, Charsets.UTF_8))
+            val data = root.optJSONArray("data") ?: return null
+            if (data.length() == 0) return null
+            val track = data.optJSONObject(0) ?: return null
+            val album = track.optJSONObject("album") ?: return null
+            album.optString("cover_medium")
+                .ifBlank { album.optString("cover_big") }
+                .ifBlank { album.optString("cover") }
+                .takeIf { it.isNotBlank() }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun queryItunesArtworkUrl(query: String): String? {
+        return try {
+            val encoded = URLEncoder.encode(query, "UTF-8")
+            val (bytes, _) = downloadHttpBytes("https://itunes.apple.com/search?term=$encoded&media=music&limit=1")
+            if (bytes == null) return null
+            val root = JSONObject(String(bytes, Charsets.UTF_8))
+            val results = root.optJSONArray("results") ?: return null
+            if (results.length() == 0) return null
+            val item = results.optJSONObject(0) ?: return null
+            val rawUrl = item.optString("artworkUrl100").ifBlank { item.optString("artworkUrl60") }
+            if (rawUrl.isBlank()) return null
+            rawUrl.replace("100x100bb", "300x300bb").replace("60x60bb", "300x300bb")
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun downloadHttpBytes(urlString: String): Pair<ByteArray?, String> {
         var conn: HttpURLConnection? = null
         return try {
             conn = (URL(urlString).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 4000
-                readTimeout = 4000
+                connectTimeout = 4500
+                readTimeout = 4500
                 instanceFollowRedirects = true
                 requestMethod = "GET"
-                setRequestProperty("User-Agent", "ClawdBridge/2.0")
+                setRequestProperty("User-Agent", BROWSER_USER_AGENT)
+                setRequestProperty("Accept", "image/avif,image/webp,image/apng,image/*,application/json;q=0.9,*/*;q=0.8")
             }
-            if (conn.responseCode !in 200..299) return null
-            conn.inputStream?.use { stream ->
+            val code = conn.responseCode
+            if (code !in 200..299) {
+                return Pair(null, "http:$code")
+            }
+            val bytes = conn.inputStream?.use { stream ->
                 readLimitedBytes(stream, MAX_REMOTE_IMAGE_BYTES)
             }
-        } catch (_: Throwable) {
-            null
+            Pair(bytes, "http:$code")
+        } catch (t: Throwable) {
+            Pair(null, "http:${t.javaClass.simpleName}")
         } finally {
             conn?.disconnect()
         }
@@ -212,7 +502,8 @@ object ArtworkExtractor {
         var total = 0
         while (true) {
             val read = input.read(buffer)
-            if (read <= 0) break
+            if (read < 0) break
+            if (read == 0) continue
             total += read
             if (total > maxBytes) return null
             out.write(buffer, 0, read)
@@ -418,7 +709,7 @@ object ArtworkExtractor {
             return DEFAULT_PALETTE_INTS
         }
 
-        // Monochrome / B&W cover (like greyscale portraits): derive an atmospheric metallic/rosy-slate triad
+        // Monochrome / B&W cover: derive an atmospheric metallic/rosy-slate triad
         if (meanSat < 0.10f) {
             val rMean = avgR / avgCount
             val gMean = avgG / avgCount
@@ -452,7 +743,6 @@ object ArtworkExtractor {
         val weight1 = binWeight[bin1]
         val color1 = normalizeBinColor(bin1)
 
-        // Second distinct bin (>= 24 deg away, >= 16% of primary weight)
         val bin2 = rankedBins.firstOrNull { candidate ->
             candidate != bin1 &&
                 hueDistanceBins(candidate, bin1) >= 2 &&
@@ -464,7 +754,6 @@ object ArtworkExtractor {
             deriveAnalogousColor(color1, hueShift = 28f, satScale = 0.90f, valScale = 0.92f)
         }
 
-        // Third distinct bin (>= 24 deg from both, >= 10% weight) or analogous opposite shift
         val bin3 = rankedBins.firstOrNull { candidate ->
             candidate != bin1 &&
                 candidate != bin2 &&

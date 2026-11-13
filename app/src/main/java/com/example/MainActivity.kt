@@ -153,6 +153,7 @@ fun ClawdBridgeMainApp() {
     val ignoredPackages by AppFilterManager.ignoredPackages.collectAsState()
     val discoveredApps by AppFilterManager.discoveredApps.collectAsState()
     val syncOffsetMs by MediaBridgeStateHolder.syncOffsetMs.collectAsState()
+    val artworkDebugStatus by MediaBridgeStateHolder.artworkDebugStatus.collectAsState()
 
     var isNotificationAccessGranted by remember {
         mutableStateOf(NotificationRebindHelper.isNotificationAccessGranted(context))
@@ -307,6 +308,7 @@ fun ClawdBridgeMainApp() {
                         lastRequestTimestamp = lastRequestTimestamp,
                         syncOffsetMs = syncOffsetMs,
                         onSyncOffsetChange = { MediaBridgeStateHolder.setSyncOffsetMs(it) },
+                        artworkDebugStatus = artworkDebugStatus,
                         isFilterEnabled = isFilterEnabled,
                         ignoredPackages = ignoredPackages,
                         discoveredApps = discoveredApps,

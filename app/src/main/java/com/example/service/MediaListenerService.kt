@@ -24,10 +24,17 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import java.util.concurrent.CopyOnWriteArrayList
 
+private data class NotificationArtExtract(
+    val bitmap: Bitmap?,
+    val uriFallback: String?,
+    val notifTitle: String,
+    val debugNote: String
+)
+
 /**
  * Background notification and media listener service.
  * Intercepts active MediaSessions from Spotify, SoundCloud, YouTube Music, VK, etc.,
- * extracts notification album artwork hints (when players omit inline Metadata bitmaps),
+ * extracts notification album artwork hints & URI fallbacks (when players omit inline Metadata bitmaps),
  * tracks seen media apps for the optional blacklist filter, and reacts instantaneously
  * to filter changes.
  */
@@ -111,9 +118,16 @@ class MediaListenerService : NotificationListenerService() {
         val isMediaNotification = isMediaStyleNotification(sbn.notification)
         if (!isTrackedMediaApp && !isMediaNotification) return
 
-        val bitmap = ArtworkExtractor.extractBitmapFromNotification(this, sbn.notification) ?: return
+        val probe = ArtworkExtractor.probeBitmapFromNotification(this, sbn.notification)
+        if (probe.bitmap == null && probe.uriFallback == null) return
         val notifTitle = sbn.notification.extras?.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: ""
-        MediaBridgeStateHolder.updateNotificationArtwork(pkg, notifTitle, bitmap)
+        MediaBridgeStateHolder.updateNotificationArtwork(
+            packageName = pkg,
+            notifTitle = notifTitle,
+            bitmap = probe.bitmap,
+            uriFallback = probe.uriFallback,
+            debugNote = probe.debugNote
+        )
     }
 
     override fun onListenerDisconnected() {
@@ -203,49 +217,61 @@ class MediaListenerService : NotificationListenerService() {
             }
         }
 
-        val (notifBitmap, notifTitle) = extractNotificationArtForController(playingController)
+        val notifArt = extractNotificationArtForController(playingController)
         MediaBridgeStateHolder.setActiveController(
             controller = playingController,
             forcePush = true,
-            notificationArtBitmap = notifBitmap,
-            notificationTitle = notifTitle
+            notificationArtBitmap = notifArt.bitmap,
+            notificationArtUri = notifArt.uriFallback,
+            notificationTitle = notifArt.notifTitle,
+            notificationDebugNote = notifArt.debugNote
         )
     }
 
-    private fun extractNotificationArtForController(controller: MediaController?): Pair<Bitmap?, String> {
-        if (controller == null) return Pair(null, "")
-        val pkg = controller.packageName ?: return Pair(null, "")
+    private fun extractNotificationArtForController(controller: MediaController?): NotificationArtExtract {
+        if (controller == null) return NotificationArtExtract(null, null, "", "no_ctrl")
+        val pkg = controller.packageName ?: return NotificationArtExtract(null, null, "", "no_pkg")
         val notifications = try {
             activeNotifications
-        } catch (_: Throwable) {
-            null
-        } ?: return Pair(null, "")
+        } catch (t: Throwable) {
+            return NotificationArtExtract(null, null, "", "activeNotif:${t.javaClass.simpleName}")
+        } ?: return NotificationArtExtract(null, null, "", "activeNotif=null")
 
         val targetToken = controller.sessionToken
 
-        // Pass 1: exact EXTRA_MEDIA_SESSION token match
         val exactMatch = notifications.firstOrNull { sbn ->
             sbn.packageName == pkg && getMediaSessionToken(sbn.notification) == targetToken
         }
         if (exactMatch != null) {
-            val bmp = ArtworkExtractor.extractBitmapFromNotification(this, exactMatch.notification)
+            val probe = ArtworkExtractor.probeBitmapFromNotification(this, exactMatch.notification)
             val title = exactMatch.notification.extras?.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: ""
-            if (bmp != null) return Pair(bmp, title)
+            return NotificationArtExtract(probe.bitmap, probe.uriFallback, title, probe.debugNote)
         }
 
-        // Pass 2: package match with MediaStyle / TRANSPORT category or large icon
         val pkgMatches = notifications.filter { it.packageName == pkg }
             .sortedByDescending { if (isMediaStyleNotification(it.notification)) 1 else 0 }
 
-        for (sbn in pkgMatches) {
-            val bmp = ArtworkExtractor.extractBitmapFromNotification(this, sbn.notification)
-            if (bmp != null) {
-                val title = sbn.notification.extras?.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: ""
-                return Pair(bmp, title)
-            }
+        if (pkgMatches.isEmpty()) {
+            return NotificationArtExtract(null, null, "", "no_sbn_for($pkg, total=${notifications.size})")
         }
 
-        return Pair(null, "")
+        var lastNote = "sbn_no_art"
+        var bestUri: String? = null
+        var bestTitle = ""
+        for (sbn in pkgMatches) {
+            val probe = ArtworkExtractor.probeBitmapFromNotification(this, sbn.notification)
+            val title = sbn.notification.extras?.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: ""
+            if (probe.bitmap != null) {
+                return NotificationArtExtract(probe.bitmap, null, title, probe.debugNote)
+            }
+            if (probe.uriFallback != null && bestUri == null) {
+                bestUri = probe.uriFallback
+                bestTitle = title
+            }
+            lastNote = probe.debugNote
+        }
+
+        return NotificationArtExtract(null, bestUri, bestTitle, lastNote)
     }
 
     private fun isMediaStyleNotification(notification: Notification?): Boolean {
