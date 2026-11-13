@@ -8,11 +8,21 @@ import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
 import android.service.notification.NotificationListenerService
 import android.util.Log
+import com.example.filter.AppFilterManager
 import com.example.state.MediaBridgeStateHolder
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.launch
+import java.util.concurrent.CopyOnWriteArrayList
 
 /**
  * Background notification and media listener service.
- * Intercepts active MediaSessions from Spotify, SoundCloud, YouTube Music, VK, etc.
+ * Intercepts active MediaSessions from Spotify, SoundCloud, YouTube Music, VK, etc.,
+ * tracks seen media apps for the optional blacklist filter, and reacts instantaneously
+ * to filter changes.
  */
 class MediaListenerService : NotificationListenerService() {
 
@@ -20,10 +30,10 @@ class MediaListenerService : NotificationListenerService() {
         const val TAG = "MediaListenerService"
     }
 
+    private val serviceScope = CoroutineScope(Dispatchers.Main.immediate + SupervisorJob())
     private var mediaSessionManager: MediaSessionManager? = null
     private var componentName: ComponentName? = null
-    private val activeControllers = mutableListOf<MediaController>()
-
+    private val activeControllers = CopyOnWriteArrayList<MediaController>()
     private val callbackMap = mutableMapOf<MediaController, MediaController.Callback>()
 
     private val sessionsListener = MediaSessionManager.OnActiveSessionsChangedListener { controllers ->
@@ -33,6 +43,17 @@ class MediaListenerService : NotificationListenerService() {
 
     override fun onCreate() {
         super.onCreate()
+        AppFilterManager.init(this)
+        serviceScope.launch {
+            combine(
+                AppFilterManager.isFilterEnabled,
+                AppFilterManager.ignoredPackages
+            ) { _, _ -> Unit }.collect {
+                if (activeControllers.isNotEmpty()) {
+                    evaluateActiveSession()
+                }
+            }
+        }
         Log.i(TAG, "MediaListenerService created")
     }
 
@@ -50,6 +71,7 @@ class MediaListenerService : NotificationListenerService() {
     override fun onListenerConnected() {
         super.onListenerConnected()
         Log.i(TAG, "Notification listener connected!")
+        AppFilterManager.init(this)
         MediaBridgeStateHolder.setServiceConnected(true)
 
         try {
@@ -83,6 +105,7 @@ class MediaListenerService : NotificationListenerService() {
 
     override fun onDestroy() {
         super.onDestroy()
+        serviceScope.cancel()
         unregisterAllCallbacks()
         try {
             mediaSessionManager?.removeOnActiveSessionsChangedListener(sessionsListener)
@@ -96,25 +119,32 @@ class MediaListenerService : NotificationListenerService() {
         activeControllers.addAll(controllers)
 
         for (controller in controllers) {
+            AppFilterManager.recordSeenPackage(this, controller.packageName)
             val callback = object : MediaController.Callback() {
                 override fun onPlaybackStateChanged(state: PlaybackState?) {
                     Log.d(TAG, "PlaybackState changed for ${controller.packageName}: ${state?.state}")
+                    AppFilterManager.recordSeenPackage(this@MediaListenerService, controller.packageName)
                     evaluateActiveSession()
                 }
 
                 override fun onMetadataChanged(metadata: MediaMetadata?) {
                     Log.d(TAG, "Metadata changed for ${controller.packageName}")
+                    AppFilterManager.recordSeenPackage(this@MediaListenerService, controller.packageName)
                     evaluateActiveSession()
                 }
 
                 override fun onSessionDestroyed() {
                     Log.d(TAG, "Session destroyed for ${controller.packageName}")
                     activeControllers.remove(controller)
-                    callbackMap.remove(controller)
+                    synchronized(callbackMap) {
+                        callbackMap.remove(controller)
+                    }
                     evaluateActiveSession()
                 }
             }
-            callbackMap[controller] = callback
+            synchronized(callbackMap) {
+                callbackMap[controller] = callback
+            }
             try {
                 controller.registerCallback(callback)
             } catch (e: Exception) {
@@ -126,11 +156,12 @@ class MediaListenerService : NotificationListenerService() {
     }
 
     private fun evaluateActiveSession() {
-        // Find the currently playing controller, or the most recent active one
         var playingController: MediaController? = null
 
         for (controller in activeControllers) {
             try {
+                AppFilterManager.recordSeenPackage(this, controller.packageName)
+                if (AppFilterManager.shouldIgnore(controller.packageName)) continue
                 val state = controller.playbackState
                 if (state != null && state.state == PlaybackState.STATE_PLAYING) {
                     playingController = controller
@@ -140,9 +171,9 @@ class MediaListenerService : NotificationListenerService() {
         }
 
         if (playingController == null && activeControllers.isNotEmpty()) {
-            // Check if any controller has media metadata even if paused
             for (controller in activeControllers) {
                 try {
+                    if (AppFilterManager.shouldIgnore(controller.packageName)) continue
                     if (controller.playbackState != null) {
                         playingController = controller
                         break
@@ -151,15 +182,17 @@ class MediaListenerService : NotificationListenerService() {
             }
         }
 
-        MediaBridgeStateHolder.setActiveController(playingController)
+        MediaBridgeStateHolder.setActiveController(playingController, forcePush = true)
     }
 
     private fun unregisterAllCallbacks() {
-        for ((controller, callback) in callbackMap) {
-            try {
-                controller.unregisterCallback(callback)
-            } catch (ignored: Exception) {}
+        synchronized(callbackMap) {
+            for ((controller, callback) in callbackMap) {
+                try {
+                    controller.unregisterCallback(callback)
+                } catch (ignored: Exception) {}
+            }
+            callbackMap.clear()
         }
-        callbackMap.clear()
     }
 }

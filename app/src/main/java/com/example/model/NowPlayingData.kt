@@ -10,17 +10,21 @@ data class NowPlayingData(
     val player: String = "",
     val artist: String = "",
     val title: String = "",
+    val album: String = "",
     val positionMs: Long = 0L,
     val durationMs: Long = 0L,
     val positionSec: Double = 0.0,
+    val playbackSpeed: Float = 1.0f,
     val isPlaying: Boolean = false,
     val positionKnown: Boolean = true,
+    val accentColorHex: String = DEFAULT_ACCENT_HEX,
+    val hasArtwork: Boolean = false,
     val timestamp: Long = System.currentTimeMillis()
 ) {
     /**
-     * Formats JSON response adhering strictly to ТЗ v1.2 & v1.3 specification:
-     * - When music is playing: full JSON with track info, precise sub-millisecond timestamps,
-     *   and "position_known": true|false
+     * Formats JSON response adhering strictly to ТЗ v1.2, v1.3 and v2.0 extensions:
+     * - When music is playing: full JSON with track info, album, playback_speed,
+     *   accent_color, has_artwork, position_ms, position_sec, position_known, timestamp.
      * - When idle or paused: minimal {"has_media": false, "is_playing": false}
      */
     fun toJsonString(): String {
@@ -28,19 +32,33 @@ data class NowPlayingData(
             val safePlayer = escapeJson(player)
             val safeArtist = escapeJson(artist)
             val safeTitle = escapeJson(title)
+            val safeAlbum = escapeJson(album)
+            val safeColor = escapeJson(accentColorHex.ifBlank { DEFAULT_ACCENT_HEX })
             val formattedSec = String.format(Locale.US, "%.2f", positionSec)
+            val formattedSpeed = String.format(Locale.US, "%.2f", playbackSpeed)
 
-            """{"has_media":true,"player":"$safePlayer","artist":"$safeArtist","title":"$safeTitle","position_ms":$positionMs,"duration_ms":$durationMs,"position_sec":$formattedSec,"is_playing":true,"position_known":$positionKnown,"timestamp":$timestamp}"""
+            """{"has_media":true,"player":"$safePlayer","artist":"$safeArtist","title":"$safeTitle","album":"$safeAlbum","position_ms":$positionMs,"duration_ms":$durationMs,"position_sec":$formattedSec,"playback_speed":$formattedSpeed,"is_playing":true,"position_known":$positionKnown,"accent_color":"$safeColor","has_artwork":$hasArtwork,"timestamp":$timestamp}"""
         } else {
             """{"has_media":false,"is_playing":false}"""
         }
     }
 
     /**
-     * Compact JSON strictly <= maxBytes (default 512 bytes per ТЗ v1.3) for flash-memory backup
+     * Compact JSON strictly <= maxBytes (default 512 bytes per ТЗ v1.3) for flash-memory backup.
+     * Excludes heavy/optional metadata so track + position always fits cleanly.
      */
     fun toBackupJsonString(maxBytes: Int = 512): String {
-        var str = toJsonString()
+        if (!hasMedia || !isPlaying) {
+            return """{"has_media":false,"is_playing":false}"""
+        }
+        val safePlayer = escapeJson(player.take(40))
+        val formattedSec = String.format(Locale.US, "%.2f", positionSec)
+
+        fun buildCompact(a: String, t: String): String {
+            return """{"has_media":true,"player":"$safePlayer","artist":"$a","title":"$t","position_ms":$positionMs,"duration_ms":$durationMs,"position_sec":$formattedSec,"is_playing":true,"position_known":$positionKnown,"timestamp":$timestamp}"""
+        }
+
+        var str = buildCompact(escapeJson(artist), escapeJson(title))
         var bytes = str.toByteArray(Charsets.UTF_8)
         if (bytes.size <= maxBytes) return str
 
@@ -48,15 +66,13 @@ data class NowPlayingData(
         var artistLen = artist.length
         while (bytes.size > maxBytes && (titleLen > 5 || artistLen > 5)) {
             if (titleLen > artistLen) {
-                titleLen -= 4
+                titleLen = (titleLen - 4).coerceAtLeast(5)
             } else {
-                artistLen -= 4
+                artistLen = (artistLen - 4).coerceAtLeast(5)
             }
             val safeT = escapeJson(title.take(titleLen))
             val safeA = escapeJson(artist.take(artistLen))
-            val safeP = escapeJson(player.take(40))
-            val formattedSec = String.format(Locale.US, "%.2f", positionSec)
-            str = """{"has_media":true,"player":"$safeP","artist":"$safeA","title":"$safeT","position_ms":$positionMs,"duration_ms":$durationMs,"position_sec":$formattedSec,"is_playing":true,"position_known":$positionKnown,"timestamp":$timestamp}"""
+            str = buildCompact(safeA, safeT)
             bytes = str.toByteArray(Charsets.UTF_8)
         }
         return str
@@ -70,18 +86,25 @@ data class NowPlayingData(
             val safePlayer = escapeJson(player)
             val safeArtist = escapeJson(artist)
             val safeTitle = escapeJson(title)
+            val safeAlbum = escapeJson(album)
+            val safeColor = escapeJson(accentColorHex.ifBlank { DEFAULT_ACCENT_HEX })
             val formattedSec = String.format(Locale.US, "%.2f", positionSec)
+            val formattedSpeed = String.format(Locale.US, "%.2f", playbackSpeed)
 
             """{
   "has_media": true,
   "player": "$safePlayer",
   "artist": "$safeArtist",
   "title": "$safeTitle",
+  "album": "$safeAlbum",
   "position_ms": $positionMs,
   "duration_ms": $durationMs,
   "position_sec": $formattedSec,
+  "playback_speed": $formattedSpeed,
   "is_playing": true,
   "position_known": $positionKnown,
+  "accent_color": "$safeColor",
+  "has_artwork": $hasArtwork,
   "timestamp": $timestamp
 }"""
         } else {
@@ -104,6 +127,7 @@ data class NowPlayingData(
     }
 
     companion object {
+        const val DEFAULT_ACCENT_HEX = "#00E5FF"
         val IDLE = NowPlayingData(hasMedia = false, isPlaying = false, positionKnown = true)
     }
 }

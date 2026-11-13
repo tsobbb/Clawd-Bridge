@@ -6,12 +6,10 @@ import com.example.state.MediaBridgeStateHolder
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlin.math.max
-import kotlin.math.min
 
 /**
  * Built-in test simulator allowing instant diagnostics and verification
- * in Android emulator environments without external streaming apps.
+ * without external streaming apps.
  * Operates purely on SystemClock.elapsedRealtime() (ТЗ v1.3).
  */
 object TestMediaSimulator {
@@ -19,6 +17,7 @@ object TestMediaSimulator {
     const val playerPackage = "com.soundcloud.android"
     const val artistName = "Juice WRLD"
     const val trackTitle = "Lean Wit Me"
+    const val albumName = "Goodbye & Good Riddance"
     const val durationMs = 175000L
 
     private val _isSimulatorActive = MutableStateFlow(false)
@@ -36,7 +35,7 @@ object TestMediaSimulator {
             play()
         } else {
             _isPlaying.value = false
-            MediaBridgeStateHolder.setSimulatedPlayback(null)
+            MediaBridgeStateHolder.setSimulatedPlayback(null, forcePush = true)
         }
     }
 
@@ -75,7 +74,7 @@ object TestMediaSimulator {
 
     private fun syncState() {
         if (!_isSimulatorActive.value) {
-            MediaBridgeStateHolder.setSimulatedPlayback(null)
+            MediaBridgeStateHolder.setSimulatedPlayback(null, forcePush = true)
             return
         }
 
@@ -86,11 +85,15 @@ object TestMediaSimulator {
                 player = playerPackage,
                 artist = artistName,
                 title = trackTitle,
+                album = albumName,
                 positionMs = pos,
                 durationMs = durationMs,
                 positionSec = pos / 1000.0,
+                playbackSpeed = 1.0f,
                 isPlaying = true,
                 positionKnown = true,
+                accentColorHex = "#FF6D7A",
+                hasArtwork = true,
                 timestamp = System.currentTimeMillis()
             )
         } else {
@@ -100,6 +103,6 @@ object TestMediaSimulator {
                 positionKnown = true
             )
         }
-        MediaBridgeStateHolder.setSimulatedPlayback(data)
+        MediaBridgeStateHolder.setSimulatedPlayback(data, forcePush = true)
     }
 }

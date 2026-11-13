@@ -1,9 +1,11 @@
 package com.example
 
+import com.example.filter.AppFilterManager
 import com.example.model.NowPlayingData
 import com.example.plugin.ParsedSource
 import com.example.plugin.PluginDownloader
 import com.example.plugin.RemotePluginFile
+import com.example.server.LocalHttpServer
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -12,17 +14,21 @@ import org.junit.Test
 class ExampleUnitTest {
 
     @Test
-    fun `verify NowPlayingData JSON format when playing matches ТЗ specification`() {
+    fun `verify NowPlayingData JSON format when playing matches specification`() {
         val sample = NowPlayingData(
             hasMedia = true,
             player = "com.soundcloud.android",
             artist = "Juice WRLD",
             title = "Lean Wit Me",
+            album = "Goodbye & Good Riddance",
             positionMs = 24350L,
             durationMs = 175000L,
             positionSec = 24.35,
+            playbackSpeed = 1.25f,
             isPlaying = true,
             positionKnown = true,
+            accentColorHex = "#FF6D7A",
+            hasArtwork = true,
             timestamp = 1730868200123L
         )
 
@@ -32,15 +38,19 @@ class ExampleUnitTest {
         assertTrue(jsonString.contains(""""player":"com.soundcloud.android""""))
         assertTrue(jsonString.contains(""""artist":"Juice WRLD""""))
         assertTrue(jsonString.contains(""""title":"Lean Wit Me""""))
+        assertTrue(jsonString.contains(""""album":"Goodbye & Good Riddance""""))
         assertTrue(jsonString.contains(""""position_ms":24350"""))
         assertTrue(jsonString.contains(""""duration_ms":175000"""))
         assertTrue(jsonString.contains(""""position_sec":24.35"""))
+        assertTrue(jsonString.contains(""""playback_speed":1.25"""))
         assertTrue(jsonString.contains(""""is_playing":true"""))
         assertTrue(jsonString.contains(""""position_known":true"""))
+        assertTrue(jsonString.contains(""""accent_color":"#FF6D7A""""))
+        assertTrue(jsonString.contains(""""has_artwork":true"""))
         assertTrue(jsonString.contains(""""timestamp":1730868200123"""))
 
         val backupJsonString = sample.toBackupJsonString(512)
-        assertTrue("Backup JSON must be <= 512 bytes per ТЗ v1.3", backupJsonString.toByteArray(Charsets.UTF_8).size <= 512)
+        assertTrue("Backup JSON must be <= 512 bytes", backupJsonString.toByteArray(Charsets.UTF_8).size <= 512)
     }
 
     @Test
@@ -62,6 +72,7 @@ class ExampleUnitTest {
             player = "com.spotify.music",
             artist = veryLongArtist,
             title = veryLongTitle,
+            album = "C".repeat(500),
             positionMs = 12000L,
             durationMs = 60000L,
             positionSec = 12.0,
@@ -104,9 +115,13 @@ class ExampleUnitTest {
     }
 
     @Test
-    fun `verify PluginDownloader sanitizes unsafe filenames`() {
+    fun `verify PluginDownloader sanitizes unsafe filenames and converts py to plugin`() {
         assertEquals("clawd v3.4.plugin", PluginDownloader.sanitizeFileName("public/clawd v3.4.plugin"))
         assertEquals("test_file.plugin", PluginDownloader.sanitizeFileName("../test:file.plugin"))
+
+        assertEquals("clawd_v3_4.plugin", PluginDownloader.resolveTargetFileName("clawd_v3_4.py", true))
+        assertEquals("clawd_v3_4.py", PluginDownloader.resolveTargetFileName("clawd_v3_4.py", false))
+        assertEquals("clawd_v3_4.plugin", PluginDownloader.resolveTargetFileName("clawd_v3_4.plugin", true))
     }
 
     @Test
@@ -142,5 +157,19 @@ class ExampleUnitTest {
         )
         val sortedNewer = PluginDownloader.sortAndFilterPlugins(newerVersions)
         assertEquals("clawd_v3_10.py", sortedNewer.first().name)
+    }
+
+    @Test
+    fun `verify AppFilterManager ignores only when enabled`() {
+        val ignored = setOf("com.google.android.youtube")
+        assertFalse(AppFilterManager.evaluateIgnore(false, ignored, "com.google.android.youtube"))
+        assertTrue(AppFilterManager.evaluateIgnore(true, ignored, "com.google.android.youtube"))
+        assertFalse(AppFilterManager.evaluateIgnore(true, ignored, "com.spotify.music"))
+    }
+
+    @Test
+    fun `verify SSE frame formatting matches standard text event stream format`() {
+        val frame = LocalHttpServer.formatSseFrame("now_playing", """{"has_media":false}""")
+        assertEquals("event: now_playing\ndata: {\"has_media\":false}\n\n", frame)
     }
 }

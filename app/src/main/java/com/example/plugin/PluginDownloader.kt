@@ -54,13 +54,18 @@ object PluginDownloader {
     private const val PREFS_NAME = "clawd_plugin_prefs"
     private const val KEY_SOURCE_URL = "source_url"
     private const val KEY_GITHUB_TOKEN = "github_token"
+    private const val KEY_CONVERT_PY_TO_PLUGIN = "convert_py_to_plugin"
     private const val CACHE_SUBDIR = "plugins"
 
     private val knownTelegramPackages = listOf(
-        "org.telegram.messenger",
-        "org.telegram.messenger.web",
+        "com.aprelgram.messenger",
+        "org.aprelgram.messenger",
+        "app.aprelgram.messenger",
+        "ru.aprel.gram",
         "com.exteragram.messenger",
         "com.radolyn.ayugram",
+        "org.telegram.messenger",
+        "org.telegram.messenger.web",
         "uz.unnarsx.cherrygram",
         "org.thunderdog.challegram",
         "org.telegram.plus",
@@ -70,6 +75,8 @@ object PluginDownloader {
     )
 
     private val telegramKeywords = listOf(
+        "aprel",
+        "aprelgram",
         "telegram",
         "exteragram",
         "ayugram",
@@ -106,6 +113,27 @@ object PluginDownloader {
             .edit()
             .putString(KEY_GITHUB_TOKEN, token.trim())
             .apply()
+    }
+
+    fun getConvertPyToPlugin(context: Context): Boolean {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getBoolean(KEY_CONVERT_PY_TO_PLUGIN, true)
+    }
+
+    fun setConvertPyToPlugin(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_CONVERT_PY_TO_PLUGIN, enabled)
+            .apply()
+    }
+
+    internal fun resolveTargetFileName(rawName: String, convertPyToPlugin: Boolean): String {
+        val cleaned = sanitizeFileName(rawName)
+        return if (convertPyToPlugin && cleaned.lowercase(Locale.US).endsWith(".py")) {
+            cleaned.dropLast(3) + ".plugin"
+        } else {
+            cleaned
+        }
     }
 
     internal fun parseSourceUrl(rawUrl: String): ParsedSource {
@@ -486,6 +514,7 @@ object PluginDownloader {
         context: Context,
         remoteFile: RemotePluginFile,
         githubToken: String = "",
+        convertPyToPlugin: Boolean = true,
         onProgress: (Float?) -> Unit = {}
     ): File = withContext(Dispatchers.IO) {
         val cacheDir = File(context.cacheDir, CACHE_SUBDIR).apply {
@@ -495,7 +524,7 @@ object PluginDownloader {
             runCatching { old.delete() }
         }
 
-        val safeName = sanitizeFileName(remoteFile.name)
+        val safeName = resolveTargetFileName(remoteFile.name, convertPyToPlugin)
         val tempFile = File(cacheDir, "$safeName.part")
         val targetFile = File(cacheDir, safeName)
 

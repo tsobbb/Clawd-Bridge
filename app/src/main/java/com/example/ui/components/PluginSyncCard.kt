@@ -44,6 +44,8 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
@@ -92,6 +94,7 @@ fun PluginSyncCard(
 
     var sourceUrl by remember { mutableStateOf(PluginDownloader.getSavedSourceUrl(context)) }
     var githubToken by remember { mutableStateOf(PluginDownloader.getSavedToken(context)) }
+    var convertPyToPlugin by remember { mutableStateOf(PluginDownloader.getConvertPyToPlugin(context)) }
     var showSourceSettings by remember { mutableStateOf(false) }
     var showTokenText by remember { mutableStateOf(false) }
 
@@ -169,7 +172,8 @@ fun PluginSyncCard(
                 val downloaded = PluginDownloader.downloadPluginToCache(
                     context = context,
                     remoteFile = targetRemote,
-                    githubToken = githubToken
+                    githubToken = githubToken,
+                    convertPyToPlugin = convertPyToPlugin
                 ) { progress ->
                     downloadProgress = progress
                 }
@@ -253,7 +257,7 @@ fun PluginSyncCard(
                     )
                     Column {
                         Text(
-                            text = "Плагин Clawd (GitHub → ТГ)",
+                            text = "Плагин Clawd (GitHub → AprelGram / ТГ)",
                             style = MaterialTheme.typography.titleMedium.copy(
                                 fontWeight = FontWeight.Bold,
                                 color = TextPrimary
@@ -418,6 +422,50 @@ fun PluginSyncCard(
                 }
             }
 
+            // Toggle: rename .py -> .plugin for AprelGram / exteraGram
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = DarkBackground,
+                border = BorderStroke(1.dp, DarkSurfaceHighlight)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text(
+                            text = "Конвертировать .py → .plugin",
+                            style = MaterialTheme.typography.bodyMedium.copy(
+                                fontWeight = FontWeight.SemiBold,
+                                color = TextPrimary
+                            )
+                        )
+                        Text(
+                            text = "Для прямой установки в AprelGram / exteraGram",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                color = TextSecondary,
+                                fontSize = 11.sp
+                            )
+                        )
+                    }
+                    Switch(
+                        checked = convertPyToPlugin,
+                        onCheckedChange = { enabled ->
+                            convertPyToPlugin = enabled
+                            PluginDownloader.setConvertPyToPlugin(context, enabled)
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.Black,
+                            checkedTrackColor = ElectricViolet
+                        ),
+                        modifier = Modifier.testTag("convert_py_to_plugin_switch")
+                    )
+                }
+            }
+
             // Primary action: download latest plugin into app cache and open Telegram Saved Messages picker
             Button(
                 onClick = { downloadAndShare(null) },
@@ -451,7 +499,7 @@ fun PluginSyncCard(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "Скачать плагин и в Избранное ТГ",
+                        text = "Скачать и отправить в Избранное",
                         fontWeight = FontWeight.Bold
                     )
                 }
