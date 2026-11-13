@@ -77,10 +77,14 @@ import com.example.ui.theme.DarkSurfaceHighlight
 import com.example.ui.theme.ElectricCyan
 import com.example.ui.theme.ElectricViolet
 import com.example.ui.theme.JetBrainsMonoFontFamily
+import androidx.compose.material.icons.filled.Lyrics
+import androidx.compose.ui.graphics.luminance
+import com.example.ui.theme.LivingPaletteState
 import com.example.ui.theme.NeonEmerald
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
+import com.example.ui.theme.rotatingBorderBrush
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -99,6 +103,7 @@ data class TestApiResult(
 @Composable
 fun DiagnosticsTab(
     context: Context,
+    livingPalette: LivingPaletteState,
     isServerRunning: Boolean,
     requestCount: Long,
     activeSseClients: Int,
@@ -128,6 +133,7 @@ fun DiagnosticsTab(
     ) {
         // 1. HTTP + SSE Diagnostics Card
         HttpServerDiagnosticsCard(
+            livingPalette = livingPalette,
             isServerRunning = isServerRunning,
             requestCount = requestCount,
             activeSseClients = activeSseClients,
@@ -142,7 +148,7 @@ fun DiagnosticsTab(
             onTestNowPlaying = {
                 coroutineScope.launch {
                     isTestingApi = true
-                    apiTestResult = testLocalEndpoint("http://127.0.0.1:44444/now-playing")
+                    apiTestResult = testLocalEndpoint("http://127.0.0.1:44444/now-playing", timeoutMs = 1500)
                     isTestingApi = false
                 }
             },
@@ -153,18 +159,27 @@ fun DiagnosticsTab(
                     isTestingApi = false
                 }
             },
+            onTestLyrics = {
+                coroutineScope.launch {
+                    isTestingApi = true
+                    apiTestResult = testLocalEndpoint("http://127.0.0.1:44444/lyrics", timeoutMs = 6000)
+                    isTestingApi = false
+                }
+            },
             apiTestResult = apiTestResult,
             isTestingApi = isTestingApi
         )
 
         // 2. Global Sync Calibration Card
         SyncOffsetCard(
+            livingPalette = livingPalette,
             syncOffsetMs = syncOffsetMs,
             onSyncOffsetChange = onSyncOffsetChange
         )
 
         // 3. App Filter Card (Blacklist — disabled & empty by default)
         AppFilterCard(
+            livingPalette = livingPalette,
             isFilterEnabled = isFilterEnabled,
             ignoredPackages = ignoredPackages,
             discoveredApps = discoveredApps,
@@ -183,15 +198,17 @@ fun DiagnosticsTab(
 
         // 4. Backup Storage Card (ТЗ 3.4)
         BackupStorageCard(
+            livingPalette = livingPalette,
             targetPath = backupTargetPath,
             lastWrittenTime = backupWrittenTime,
             fileSize = backupFileSize,
             status = backupStatus
         )
 
-        // 4. Permissions & Force Rebind Card
+        // 5. Permissions & Force Rebind Card
         PermissionsAndRebindCard(
             context = context,
+            livingPalette = livingPalette,
             isNotificationAccessGranted = isNotificationAccessGranted,
             isBatteryOptIgnored = isBatteryOptIgnored,
             onForceRebind = onForceRebind
@@ -201,6 +218,7 @@ fun DiagnosticsTab(
 
 @Composable
 private fun HttpServerDiagnosticsCard(
+    livingPalette: LivingPaletteState,
     isServerRunning: Boolean,
     requestCount: Long,
     activeSseClients: Int,
@@ -209,16 +227,21 @@ private fun HttpServerDiagnosticsCard(
     onCopyUrl: (String) -> Unit,
     onTestNowPlaying: () -> Unit,
     onTestSse: () -> Unit,
+    onTestLyrics: () -> Unit,
     apiTestResult: TestApiResult?,
     isTestingApi: Boolean
 ) {
+    val accent = livingPalette.primary
+    val accent2 = livingPalette.secondary
+    val accent3 = livingPalette.tertiary
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
             .testTag("http_server_diagnostics_card"),
         shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = DarkSurface),
-        border = BorderStroke(1.dp, DarkSurfaceHighlight)
+        colors = CardDefaults.cardColors(containerColor = DarkSurface.copy(alpha = 0.82f)),
+        border = BorderStroke(1.dp, rotatingBorderBrush(livingPalette, alpha = 0.36f))
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
@@ -236,7 +259,7 @@ private fun HttpServerDiagnosticsCard(
                     Icon(
                         imageVector = Icons.Default.Http,
                         contentDescription = null,
-                        tint = ElectricCyan
+                        tint = accent
                     )
                     Text(
                         text = "HTTP + SSE API",
@@ -250,14 +273,14 @@ private fun HttpServerDiagnosticsCard(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Surface(
                         shape = RoundedCornerShape(6.dp),
-                        color = ElectricViolet.copy(alpha = 0.16f)
+                        color = accent2.copy(alpha = 0.16f)
                     ) {
                         Text(
                             text = "SSE: $activeSseClients",
                             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
                             style = MaterialTheme.typography.labelSmall.copy(
                                 fontFamily = JetBrainsMonoFontFamily,
-                                color = ElectricViolet
+                                color = accent2
                             )
                         )
                     }
@@ -265,7 +288,7 @@ private fun HttpServerDiagnosticsCard(
                         text = "$requestCount запр.",
                         style = MaterialTheme.typography.labelMedium.copy(
                             fontFamily = JetBrainsMonoFontFamily,
-                            color = NeonEmerald
+                            color = accent
                         )
                     )
                 }
@@ -273,15 +296,23 @@ private fun HttpServerDiagnosticsCard(
 
             EndpointRow(
                 url = "http://127.0.0.1:44444/now-playing",
+                urlColor = accent,
                 onCopy = { onCopyUrl("http://127.0.0.1:44444/now-playing") }
             )
             EndpointRow(
                 url = "http://127.0.0.1:44444/events (SSE)",
+                urlColor = accent,
                 onCopy = { onCopyUrl("http://127.0.0.1:44444/events") }
             )
             EndpointRow(
                 url = "http://127.0.0.1:44444/artwork",
+                urlColor = accent,
                 onCopy = { onCopyUrl("http://127.0.0.1:44444/artwork") }
+            )
+            EndpointRow(
+                url = "http://127.0.0.1:44444/lyrics",
+                urlColor = accent2,
+                onCopy = { onCopyUrl("http://127.0.0.1:44444/lyrics") }
             )
 
             Text(
@@ -305,15 +336,15 @@ private fun HttpServerDiagnosticsCard(
                         .height(48.dp)
                         .testTag("test_api_button"),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = ElectricCyan.copy(alpha = 0.2f),
-                        contentColor = ElectricCyan
+                        containerColor = accent.copy(alpha = 0.2f),
+                        contentColor = accent
                     ),
                     shape = RoundedCornerShape(10.dp)
                 ) {
                     if (isTestingApi) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(16.dp),
-                            color = ElectricCyan,
+                            color = accent,
                             strokeWidth = 2.dp
                         )
                     } else {
@@ -334,27 +365,47 @@ private fun HttpServerDiagnosticsCard(
                         .weight(1f)
                         .height(48.dp)
                         .testTag("test_sse_button"),
-                    border = BorderStroke(1.dp, ElectricViolet.copy(alpha = 0.5f)),
+                    border = BorderStroke(1.dp, accent2.copy(alpha = 0.55f)),
                     shape = RoundedCornerShape(10.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Default.Bolt,
                         contentDescription = null,
-                        tint = ElectricViolet,
+                        tint = accent2,
                         modifier = Modifier.size(18.dp)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("Тест SSE /events", color = ElectricViolet, fontSize = 12.sp)
+                    Text("Тест SSE /events", color = accent2, fontSize = 12.sp)
                 }
+            }
+
+            OutlinedButton(
+                onClick = onTestLyrics,
+                enabled = !isTestingApi && isServerRunning,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+                    .testTag("test_lyrics_button"),
+                border = BorderStroke(1.dp, accent3.copy(alpha = 0.55f)),
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Lyrics,
+                    contentDescription = null,
+                    tint = accent3,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Тест GET /lyrics (LRCLIB + NetEase + Genius)", color = accent3, fontSize = 12.sp)
             }
 
             AnimatedVisibility(visible = apiTestResult != null) {
                 apiTestResult?.let { result ->
-                    val borderColor = if (result.isSuccess) NeonEmerald else CoralRed
+                    val borderColor = if (result.isSuccess) accent else CoralRed
                     Surface(
                         shape = RoundedCornerShape(10.dp),
-                        color = DarkBackground,
-                        border = BorderStroke(1.dp, borderColor.copy(alpha = 0.4f)),
+                        color = DarkBackground.copy(alpha = 0.85f),
+                        border = BorderStroke(1.dp, borderColor.copy(alpha = 0.45f)),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Column(modifier = Modifier.padding(10.dp)) {
@@ -374,7 +425,7 @@ private fun HttpServerDiagnosticsCard(
                                 text = result.content,
                                 style = MaterialTheme.typography.bodySmall.copy(
                                     fontFamily = JetBrainsMonoFontFamily,
-                                    color = if (result.isSuccess) NeonEmerald else CoralRed,
+                                    color = if (result.isSuccess) accent else CoralRed,
                                     fontSize = 11.sp
                                 )
                             )
@@ -389,12 +440,13 @@ private fun HttpServerDiagnosticsCard(
 @Composable
 private fun EndpointRow(
     url: String,
+    urlColor: Color = NeonEmerald,
     onCopy: () -> Unit
 ) {
     Surface(
         shape = RoundedCornerShape(10.dp),
-        color = DarkBackground,
-        border = BorderStroke(1.dp, DarkSurfaceHighlight)
+        color = DarkBackground.copy(alpha = 0.80f),
+        border = BorderStroke(1.dp, DarkSurfaceHighlight.copy(alpha = 0.7f))
     ) {
         Row(
             modifier = Modifier
@@ -407,7 +459,7 @@ private fun EndpointRow(
                 text = url,
                 style = MaterialTheme.typography.bodySmall.copy(
                     fontFamily = JetBrainsMonoFontFamily,
-                    color = NeonEmerald,
+                    color = urlColor,
                     fontWeight = FontWeight.Medium
                 ),
                 modifier = Modifier.weight(1f)
@@ -431,6 +483,7 @@ private fun EndpointRow(
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AppFilterCard(
+    livingPalette: LivingPaletteState,
     isFilterEnabled: Boolean,
     ignoredPackages: Set<String>,
     discoveredApps: List<DiscoveredMediaApp>,
@@ -441,16 +494,18 @@ private fun AppFilterCard(
     onClearAll: () -> Unit
 ) {
     var customPackageInput by remember { mutableStateOf("") }
+    val accent = livingPalette.primary
+    val onAccent = if (accent.luminance() > 0.42f) Color.Black else Color.White
 
     Card(
         modifier = Modifier
             .fillMaxWidth()
             .testTag("app_filter_card"),
         shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = DarkSurface),
+        colors = CardDefaults.cardColors(containerColor = DarkSurface.copy(alpha = 0.82f)),
         border = BorderStroke(
             1.dp,
-            if (isFilterEnabled) ElectricCyan.copy(alpha = 0.45f) else DarkSurfaceHighlight
+            rotatingBorderBrush(livingPalette, alpha = if (isFilterEnabled) 0.55f else 0.30f, angleOffsetDeg = 120f)
         )
     ) {
         Column(
@@ -470,7 +525,7 @@ private fun AppFilterCard(
                     Icon(
                         imageVector = Icons.Default.FilterAlt,
                         contentDescription = null,
-                        tint = if (isFilterEnabled) ElectricCyan else TextMuted
+                        tint = if (isFilterEnabled) accent else TextMuted
                     )
                     Column {
                         Text(
@@ -495,8 +550,8 @@ private fun AppFilterCard(
                     checked = isFilterEnabled,
                     onCheckedChange = onToggleFilter,
                     colors = SwitchDefaults.colors(
-                        checkedThumbColor = Color.Black,
-                        checkedTrackColor = ElectricCyan
+                        checkedThumbColor = onAccent,
+                        checkedTrackColor = accent
                     ),
                     modifier = Modifier.testTag("app_filter_switch")
                 )
@@ -660,19 +715,21 @@ private fun AppFilterCard(
 
 @Composable
 private fun SyncOffsetCard(
+    livingPalette: LivingPaletteState,
     syncOffsetMs: Int,
     onSyncOffsetChange: (Int) -> Unit
 ) {
+    val accent = livingPalette.primary
     val formattedOffset = if (syncOffsetMs > 0) "+${syncOffsetMs} мс" else "${syncOffsetMs} мс"
     Card(
         modifier = Modifier
             .fillMaxWidth()
             .testTag("sync_offset_card"),
         shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = DarkSurface),
+        colors = CardDefaults.cardColors(containerColor = DarkSurface.copy(alpha = 0.82f)),
         border = BorderStroke(
             1.dp,
-            if (syncOffsetMs != 0) ElectricCyan.copy(alpha = 0.45f) else DarkSurfaceHighlight
+            rotatingBorderBrush(livingPalette, alpha = if (syncOffsetMs != 0) 0.55f else 0.30f, angleOffsetDeg = 60f)
         )
     ) {
         Column(
@@ -691,7 +748,7 @@ private fun SyncOffsetCard(
                     Icon(
                         imageVector = Icons.Default.Timer,
                         contentDescription = null,
-                        tint = if (syncOffsetMs != 0) ElectricCyan else TextSecondary
+                        tint = if (syncOffsetMs != 0) accent else TextSecondary
                     )
                     Column {
                         Text(
@@ -710,7 +767,7 @@ private fun SyncOffsetCard(
 
                 Surface(
                     shape = RoundedCornerShape(8.dp),
-                    color = if (syncOffsetMs != 0) ElectricCyan.copy(alpha = 0.16f) else DarkSurfaceHighlight
+                    color = if (syncOffsetMs != 0) accent.copy(alpha = 0.16f) else DarkSurfaceHighlight
                 ) {
                     Text(
                         text = formattedOffset,
@@ -718,7 +775,7 @@ private fun SyncOffsetCard(
                         style = MaterialTheme.typography.labelMedium.copy(
                             fontFamily = JetBrainsMonoFontFamily,
                             fontWeight = FontWeight.Bold,
-                            color = if (syncOffsetMs != 0) ElectricCyan else TextPrimary
+                            color = if (syncOffsetMs != 0) accent else TextPrimary
                         )
                     )
                 }
@@ -732,8 +789,8 @@ private fun SyncOffsetCard(
                 },
                 valueRange = -2000f..2000f,
                 colors = SliderDefaults.colors(
-                    thumbColor = ElectricCyan,
-                    activeTrackColor = ElectricCyan,
+                    thumbColor = accent,
+                    activeTrackColor = accent,
                     inactiveTrackColor = DarkSurfaceHighlight
                 )
             )
@@ -755,7 +812,7 @@ private fun SyncOffsetCard(
                     onClick = { onSyncOffsetChange(0) },
                     enabled = syncOffsetMs != 0
                 ) {
-                    Text("Сброс (0 мс)", fontSize = 12.sp, color = ElectricCyan)
+                    Text("Сброс (0 мс)", fontSize = 12.sp, color = accent)
                 }
 
                 OutlinedButton(
@@ -772,6 +829,7 @@ private fun SyncOffsetCard(
 
 @Composable
 private fun BackupStorageCard(
+    livingPalette: LivingPaletteState,
     targetPath: String,
     lastWrittenTime: Long,
     fileSize: Int,
@@ -782,8 +840,8 @@ private fun BackupStorageCard(
             .fillMaxWidth()
             .testTag("backup_storage_card"),
         shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = DarkSurface),
-        border = BorderStroke(1.dp, DarkSurfaceHighlight)
+        colors = CardDefaults.cardColors(containerColor = DarkSurface.copy(alpha = 0.82f)),
+        border = BorderStroke(1.dp, rotatingBorderBrush(livingPalette, alpha = 0.28f, angleOffsetDeg = 210f))
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
@@ -841,10 +899,14 @@ private fun BackupStorageCard(
 @Composable
 private fun PermissionsAndRebindCard(
     context: Context,
+    livingPalette: LivingPaletteState,
     isNotificationAccessGranted: Boolean,
     isBatteryOptIgnored: Boolean,
     onForceRebind: () -> Unit
 ) {
+    val accent = livingPalette.primary
+    val accent2 = livingPalette.secondary
+
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Button(
             onClick = {
@@ -855,9 +917,12 @@ private fun PermissionsAndRebindCard(
                 .height(48.dp)
                 .testTag("notification_permission_button"),
             colors = ButtonDefaults.buttonColors(
-                containerColor = if (isNotificationAccessGranted) DarkSurface else NeonEmerald,
-                contentColor = if (isNotificationAccessGranted) NeonEmerald else Color.Black
+                containerColor = if (isNotificationAccessGranted) DarkSurface.copy(alpha = 0.82f) else NeonEmerald,
+                contentColor = if (isNotificationAccessGranted) accent else Color.Black
             ),
+            border = if (isNotificationAccessGranted) {
+                BorderStroke(1.dp, accent.copy(alpha = 0.45f))
+            } else null,
             shape = RoundedCornerShape(12.dp)
         ) {
             Icon(
@@ -892,11 +957,11 @@ private fun PermissionsAndRebindCard(
                 .height(48.dp)
                 .testTag("battery_optimization_button"),
             colors = ButtonDefaults.outlinedButtonColors(
-                contentColor = if (isBatteryOptIgnored) NeonEmerald else ElectricCyan
+                contentColor = if (isBatteryOptIgnored) NeonEmerald else accent2
             ),
             border = BorderStroke(
                 1.dp,
-                if (isBatteryOptIgnored) NeonEmerald.copy(alpha = 0.5f) else ElectricCyan.copy(alpha = 0.5f)
+                if (isBatteryOptIgnored) NeonEmerald.copy(alpha = 0.5f) else accent2.copy(alpha = 0.5f)
             ),
             shape = RoundedCornerShape(12.dp)
         ) {
@@ -923,15 +988,15 @@ private fun PermissionsAndRebindCard(
                     .fillMaxWidth()
                     .height(48.dp)
                     .testTag("force_rebind_button"),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = ElectricCyan),
-                border = BorderStroke(1.dp, ElectricCyan.copy(alpha = 0.5f)),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = accent2),
+                border = BorderStroke(1.dp, accent2.copy(alpha = 0.5f)),
                 shape = RoundedCornerShape(12.dp)
             ) {
                 Icon(
                     imageVector = Icons.Default.Sync,
                     contentDescription = null,
                     modifier = Modifier.size(20.dp),
-                    tint = ElectricCyan
+                    tint = accent2
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
@@ -943,13 +1008,13 @@ private fun PermissionsAndRebindCard(
     }
 }
 
-private suspend fun testLocalEndpoint(targetUrl: String): TestApiResult = withContext(Dispatchers.IO) {
+private suspend fun testLocalEndpoint(targetUrl: String, timeoutMs: Int = 1500): TestApiResult = withContext(Dispatchers.IO) {
     var conn: HttpURLConnection? = null
     try {
         val url = URL(targetUrl)
         conn = (url.openConnection() as HttpURLConnection).apply {
-            connectTimeout = 1500
-            readTimeout = 1500
+            connectTimeout = timeoutMs
+            readTimeout = timeoutMs
             requestMethod = "GET"
         }
         val code = conn.responseCode

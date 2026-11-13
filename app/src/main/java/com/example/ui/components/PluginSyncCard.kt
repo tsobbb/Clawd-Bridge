@@ -77,10 +77,13 @@ import com.example.ui.theme.DarkSurfaceHighlight
 import com.example.ui.theme.DarkSurfaceVariant
 import com.example.ui.theme.ElectricCyan
 import com.example.ui.theme.ElectricViolet
+import androidx.compose.ui.graphics.luminance
+import com.example.ui.theme.LivingPaletteState
 import com.example.ui.theme.NeonEmerald
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
+import com.example.ui.theme.rotatingBorderBrush
 import kotlinx.coroutines.launch
 import java.io.File
 import java.util.Locale
@@ -88,6 +91,7 @@ import java.util.Locale
 @Composable
 fun PluginSyncCard(
     context: Context,
+    livingPalette: LivingPaletteState,
     modifier: Modifier = Modifier
 ) {
     val scope = rememberCoroutineScope()
@@ -228,13 +232,17 @@ fun PluginSyncCard(
         }
     }
 
+    val accent = livingPalette.primary
+    val secondaryAccent = livingPalette.secondary
+    val onAccent = if (accent.luminance() > 0.42f) Color.Black else Color.White
+
     Card(
         modifier = modifier
             .fillMaxWidth()
             .testTag("plugin_sync_card"),
         shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = DarkSurface),
-        border = BorderStroke(1.dp, ElectricViolet.copy(alpha = 0.45f))
+        colors = CardDefaults.cardColors(containerColor = DarkSurface.copy(alpha = 0.82f)),
+        border = BorderStroke(1.2.dp, rotatingBorderBrush(livingPalette, alpha = 0.50f, angleOffsetDeg = 30f))
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
@@ -253,7 +261,7 @@ fun PluginSyncCard(
                     Icon(
                         imageVector = Icons.Default.Extension,
                         contentDescription = null,
-                        tint = ElectricViolet
+                        tint = accent
                     )
                     Column {
                         Text(
@@ -285,7 +293,7 @@ fun PluginSyncCard(
                         Icon(
                             imageVector = Icons.Default.Settings,
                             contentDescription = "Настройки URL и токена GitHub",
-                            tint = if (showSourceSettings) ElectricViolet else TextSecondary
+                            tint = if (showSourceSettings) accent else TextSecondary
                         )
                     }
 
@@ -458,8 +466,8 @@ fun PluginSyncCard(
                             PluginDownloader.setConvertPyToPlugin(context, enabled)
                         },
                         colors = SwitchDefaults.colors(
-                            checkedThumbColor = Color.Black,
-                            checkedTrackColor = ElectricViolet
+                            checkedThumbColor = onAccent,
+                            checkedTrackColor = accent
                         ),
                         modifier = Modifier.testTag("convert_py_to_plugin_switch")
                     )
@@ -475,15 +483,15 @@ fun PluginSyncCard(
                     .height(48.dp)
                     .testTag("download_and_share_plugin_button"),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = ElectricViolet,
-                    contentColor = Color.Black
+                    containerColor = accent,
+                    contentColor = onAccent
                 ),
                 shape = RoundedCornerShape(12.dp)
             ) {
                 if (isBusy) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(18.dp),
-                        color = Color.Black,
+                        color = onAccent,
                         strokeWidth = 2.dp
                     )
                     Spacer(modifier = Modifier.width(8.dp))
@@ -513,8 +521,8 @@ fun PluginSyncCard(
                     .fillMaxWidth()
                     .height(48.dp)
                     .testTag("choose_plugin_file_button"),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = ElectricCyan),
-                border = BorderStroke(1.dp, ElectricCyan.copy(alpha = 0.45f)),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = secondaryAccent),
+                border = BorderStroke(1.dp, secondaryAccent.copy(alpha = 0.50f)),
                 shape = RoundedCornerShape(12.dp)
             ) {
                 Icon(
@@ -538,7 +546,7 @@ fun PluginSyncCard(
                             .fillMaxWidth()
                             .height(5.dp)
                             .clip(RoundedCornerShape(3.dp)),
-                        color = ElectricViolet,
+                        color = accent,
                         trackColor = DarkSurfaceHighlight
                     )
                 } else {
@@ -547,7 +555,7 @@ fun PluginSyncCard(
                             .fillMaxWidth()
                             .height(5.dp)
                             .clip(RoundedCornerShape(3.dp)),
-                        color = ElectricViolet,
+                        color = accent,
                         trackColor = DarkSurfaceHighlight
                     )
                 }

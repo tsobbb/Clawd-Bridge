@@ -4,8 +4,6 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.provider.Settings
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -14,6 +12,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -39,7 +38,6 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -48,7 +46,6 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -56,6 +53,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -70,19 +68,23 @@ import com.example.ui.theme.CoralRed
 import com.example.ui.theme.DarkSurface
 import com.example.ui.theme.DarkSurfaceHighlight
 import com.example.ui.theme.DarkSurfaceVariant
-import com.example.ui.theme.ElectricCyan
 import com.example.ui.theme.ElectricViolet
 import com.example.ui.theme.JetBrainsMonoFontFamily
+import com.example.ui.theme.LivingPaletteState
 import com.example.ui.theme.NeonEmerald
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
+import com.example.ui.theme.heroRotatingBorderBrush
+import com.example.ui.theme.rotatingBorderBrush
+import com.example.ui.theme.shimmeringHorizontalBrush
 import java.util.Locale
 
 @Composable
 fun MonitorTab(
     liveState: NowPlayingData,
     artworkBitmap: Bitmap?,
+    livingPalette: LivingPaletteState,
     isServiceConnected: Boolean,
     isNotificationAccessGranted: Boolean,
     isSimulatorActive: Boolean,
@@ -100,6 +102,7 @@ fun MonitorTab(
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         ServiceStatusBanner(
+            livingPalette = livingPalette,
             isServiceConnected = isServiceConnected,
             isNotificationAccessGranted = isNotificationAccessGranted,
             onForceRebind = onForceRebind,
@@ -111,10 +114,12 @@ fun MonitorTab(
         HeroLiveMonitorCard(
             liveState = liveState,
             artworkBitmap = artworkBitmap,
+            livingPalette = livingPalette,
             isSimulatorActive = isSimulatorActive
         )
 
         SimulatorCard(
+            livingPalette = livingPalette,
             isActive = isSimulatorActive,
             isPlaying = isSimulatorPlaying,
             onToggle = onToggleSimulator,
@@ -126,6 +131,7 @@ fun MonitorTab(
 
 @Composable
 fun ServiceStatusBanner(
+    livingPalette: LivingPaletteState,
     isServiceConnected: Boolean,
     isNotificationAccessGranted: Boolean,
     onForceRebind: () -> Unit,
@@ -137,7 +143,7 @@ fun ServiceStatusBanner(
                 status = "Служба активна",
                 subText = "IPC подключён • перехват и SSE работают в фоне",
                 color = NeonEmerald,
-                bg = Color(0xFF0C2918),
+                bg = Color(0xFF0C2418).copy(alpha = 0.80f),
                 icon = Icons.Default.CheckCircle
             )
         }
@@ -146,7 +152,7 @@ fun ServiceStatusBanner(
                 status = "Восстановление связки...",
                 subText = "Авто-Rebind в процессе (нажмите для ручного сброса)",
                 color = AmberWarning,
-                bg = Color(0xFF2C240C),
+                bg = Color(0xFF28210C).copy(alpha = 0.84f),
                 icon = Icons.Default.Refresh
             )
         }
@@ -155,10 +161,16 @@ fun ServiceStatusBanner(
                 status = "Нужен доступ к уведомлениям",
                 subText = "Нажмите для включения чтения медиа-сессий",
                 color = CoralRed,
-                bg = Color(0xFF2C1010),
+                bg = Color(0xFF2A1010).copy(alpha = 0.86f),
                 icon = Icons.Default.Error
             )
         }
+    }
+
+    val bannerBorder = if (isNotificationAccessGranted && isServiceConnected && livingPalette.isTrackActive) {
+        BorderStroke(1.dp, rotatingBorderBrush(livingPalette, alpha = 0.48f, angleOffsetDeg = 45f))
+    } else {
+        BorderStroke(1.dp, borderColor.copy(alpha = 0.55f))
     }
 
     Card(
@@ -171,7 +183,7 @@ fun ServiceStatusBanner(
             .testTag("service_status_banner"),
         shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(containerColor = bgColor),
-        border = BorderStroke(1.dp, borderColor.copy(alpha = 0.6f))
+        border = bannerBorder
     ) {
         Row(
             modifier = Modifier
@@ -237,73 +249,34 @@ private data class StatusBannerState(
 private fun HeroLiveMonitorCard(
     liveState: NowPlayingData,
     artworkBitmap: Bitmap?,
+    livingPalette: LivingPaletteState,
     isSimulatorActive: Boolean
 ) {
-    val targetPalette = remember(liveState.accentColorHex, liveState.accentColorsHex, liveState.isPlaying) {
-        if (!liveState.isPlaying) {
-            listOf(NeonEmerald, ElectricCyan, NeonEmerald)
-        } else {
-            val primary = parseHexColorOrDefault(liveState.accentColorHex, ElectricCyan)
-            val parsed = liveState.accentColorsHex.map { parseHexColorOrDefault(it, primary) }
-            when {
-                parsed.size >= 3 -> parsed.take(3)
-                parsed.size == 2 -> listOf(parsed[0], parsed[1], parsed[0])
-                else -> listOf(primary, primary, primary)
-            }
-        }
-    }
-    val accentColor by animateColorAsState(
-        targetValue = targetPalette[0],
-        animationSpec = tween(durationMillis = 450),
-        label = "artwork_accent_color_1"
-    )
-    val accentColor2 by animateColorAsState(
-        targetValue = targetPalette[1],
-        animationSpec = tween(durationMillis = 450),
-        label = "artwork_accent_color_2"
-    )
-    val accentColor3 by animateColorAsState(
-        targetValue = targetPalette[2],
-        animationSpec = tween(durationMillis = 450),
-        label = "artwork_accent_color_3"
-    )
+    val accentColor = livingPalette.primary
+    val accentColor2 = livingPalette.secondary
+    val accentColor3 = livingPalette.tertiary
+    val isPlaying = liveState.hasMedia && liveState.isPlaying
 
     val imageBitmap = remember(artworkBitmap) {
         artworkBitmap?.takeIf { !it.isRecycled }?.asImageBitmap()
-    }
-
-    val cardBorderBrush = if (liveState.isPlaying) {
-        Brush.linearGradient(
-            colors = listOf(
-                accentColor.copy(alpha = 0.72f),
-                accentColor2.copy(alpha = 0.62f),
-                accentColor3.copy(alpha = 0.55f)
-            )
-        )
-    } else {
-        Brush.linearGradient(colors = listOf(DarkSurfaceHighlight, DarkSurfaceHighlight))
     }
 
     Card(
         modifier = Modifier
             .fillMaxWidth()
             .testTag("live_monitor_card"),
-        shape = RoundedCornerShape(18.dp),
-        colors = CardDefaults.cardColors(containerColor = DarkSurface),
-        border = BorderStroke(1.2.dp, cardBorderBrush)
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = DarkSurface.copy(alpha = 0.80f)),
+        border = BorderStroke(
+            width = if (isPlaying) 2.dp else 1.2.dp,
+            brush = heroRotatingBorderBrush(livingPalette)
+        )
     ) {
+        val washAlpha = if (isPlaying) 0.16f + 0.06f * livingPalette.auraPulse else 0.05f
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(
-                    Brush.verticalGradient(
-                        colors = listOf(
-                            if (liveState.isPlaying) accentColor.copy(alpha = 0.16f) else Color.Transparent,
-                            if (liveState.isPlaying) accentColor2.copy(alpha = 0.08f) else Color.Transparent,
-                            Color.Transparent
-                        )
-                    )
-                )
+                .background(rotatingBorderBrush(livingPalette, alpha = washAlpha, angleOffsetDeg = 90f))
         ) {
             Column(
                 modifier = Modifier.padding(16.dp),
@@ -322,13 +295,13 @@ private fun HeroLiveMonitorCard(
                             modifier = Modifier
                                 .size(10.dp)
                                 .clip(CircleShape)
-                                .background(if (liveState.isPlaying) accentColor else TextMuted)
+                                .background(if (isPlaying) accentColor else TextMuted)
                         )
                         Text(
                             text = "LIVE MONITOR • 250 ms",
                             style = MaterialTheme.typography.labelMedium.copy(
                                 fontWeight = FontWeight.Bold,
-                                color = if (liveState.isPlaying) accentColor else TextMuted,
+                                color = if (isPlaying) accentColor else TextMuted,
                                 letterSpacing = 1.sp
                             )
                         )
@@ -338,12 +311,12 @@ private fun HeroLiveMonitorCard(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        if (liveState.isPlaying && liveState.hasArtwork) {
-                            Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                        if (isPlaying) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                 listOf(accentColor, accentColor2, accentColor3).forEach { dotColor ->
                                     Box(
                                         modifier = Modifier
-                                            .size(7.dp)
+                                            .size(8.dp)
                                             .clip(CircleShape)
                                             .background(dotColor)
                                     )
@@ -351,10 +324,10 @@ private fun HeroLiveMonitorCard(
                             }
                         }
 
-                        if (liveState.isPlaying && liveState.playbackSpeed != 1.0f) {
+                        if (isPlaying && liveState.playbackSpeed != 1.0f) {
                             Surface(
                                 shape = RoundedCornerShape(6.dp),
-                                color = accentColor.copy(alpha = 0.18f)
+                                color = accentColor.copy(alpha = 0.20f)
                             ) {
                                 Text(
                                     text = String.format(Locale.US, "%.2fx", liveState.playbackSpeed),
@@ -371,7 +344,7 @@ private fun HeroLiveMonitorCard(
                         if (isSimulatorActive) {
                             Surface(
                                 shape = RoundedCornerShape(6.dp),
-                                color = ElectricViolet.copy(alpha = 0.2f)
+                                color = ElectricViolet.copy(alpha = 0.22f)
                             ) {
                                 Text(
                                     text = "SIMULATOR",
@@ -386,42 +359,64 @@ private fun HeroLiveMonitorCard(
                     }
                 }
 
-                HorizontalDivider(color = DarkSurfaceHighlight)
+                HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
 
-                if (liveState.hasMedia && liveState.isPlaying) {
+                if (isPlaying) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(14.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Album Artwork Box
-                        Surface(
-                            shape = RoundedCornerShape(14.dp),
-                            color = DarkSurfaceVariant,
-                            border = BorderStroke(
-                                1.5.dp,
-                                Brush.linearGradient(listOf(accentColor, accentColor2, accentColor3))
-                            ),
-                            modifier = Modifier.size(84.dp)
+                        // Artwork box wrapped in radial ambient halo + rotating multi-color border
+                        Box(
+                            modifier = Modifier.size(96.dp),
+                            contentAlignment = Alignment.Center
                         ) {
-                            if (imageBitmap != null) {
-                                Image(
-                                    bitmap = imageBitmap,
-                                    contentDescription = "Обложка трека",
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier.fillMaxSize()
-                                )
-                            } else {
-                                Box(
-                                    modifier = Modifier.fillMaxSize(),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Album,
-                                        contentDescription = "Обложка отсутствует",
-                                        tint = accentColor.copy(alpha = 0.7f),
-                                        modifier = Modifier.size(38.dp)
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .clip(RoundedCornerShape(20.dp))
+                                    .background(
+                                        Brush.radialGradient(
+                                            colors = listOf(
+                                                accentColor.copy(alpha = 0.40f + 0.14f * livingPalette.auraPulse),
+                                                accentColor2.copy(alpha = 0.18f),
+                                                Color.Transparent
+                                            )
+                                        )
                                     )
+                            )
+
+                            Surface(
+                                shape = RoundedCornerShape(15.dp),
+                                color = DarkSurfaceVariant,
+                                border = BorderStroke(
+                                    width = 2.dp,
+                                    brush = heroRotatingBorderBrush(livingPalette)
+                                ),
+                                modifier = Modifier.size(86.dp)
+                            ) {
+                                if (imageBitmap != null) {
+                                    Image(
+                                        bitmap = imageBitmap,
+                                        contentDescription = "Обложка трека",
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                } else {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .background(rotatingBorderBrush(livingPalette, alpha = 0.30f)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Album,
+                                            contentDescription = "Обложка отсутствует",
+                                            tint = TextPrimary.copy(alpha = 0.85f),
+                                            modifier = Modifier.size(38.dp)
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -461,25 +456,21 @@ private fun HeroLiveMonitorCard(
 
                             Spacer(modifier = Modifier.height(2.dp))
 
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = DarkSurfaceVariant.copy(alpha = 0.85f),
+                                border = BorderStroke(0.8.dp, accentColor.copy(alpha = 0.35f))
                             ) {
-                                Surface(
-                                    shape = RoundedCornerShape(6.dp),
-                                    color = DarkSurfaceVariant
-                                ) {
-                                    Text(
-                                        text = liveState.player.ifEmpty { "com.android.music" },
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
-                                        style = MaterialTheme.typography.labelSmall.copy(
-                                            fontFamily = JetBrainsMonoFontFamily,
-                                            color = accentColor
-                                        ),
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
+                                Text(
+                                    text = liveState.player.ifEmpty { "com.android.music" },
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontFamily = JetBrainsMonoFontFamily,
+                                        color = accentColor
+                                    ),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
                             }
                         }
                     }
@@ -511,15 +502,24 @@ private fun HeroLiveMonitorCard(
                             )
                         }
 
-                        LinearProgressIndicator(
-                            progress = { progressFraction },
+                        // Living gradient progress bar
+                        Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(6.dp)
-                                .clip(RoundedCornerShape(3.dp)),
-                            color = accentColor,
-                            trackColor = DarkSurfaceHighlight
-                        )
+                                .height(7.dp)
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(DarkSurfaceHighlight.copy(alpha = 0.72f))
+                        ) {
+                            if (progressFraction > 0f) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth(progressFraction)
+                                        .fillMaxHeight()
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(shimmeringHorizontalBrush(livingPalette, alpha = 1f))
+                                )
+                            }
+                        }
                     }
                 } else {
                     Column(
@@ -532,7 +532,7 @@ private fun HeroLiveMonitorCard(
                         Icon(
                             imageVector = Icons.Default.MusicNote,
                             contentDescription = null,
-                            tint = TextMuted,
+                            tint = accentColor.copy(alpha = 0.75f),
                             modifier = Modifier.size(34.dp)
                         )
                         Text(
@@ -557,21 +557,25 @@ private fun HeroLiveMonitorCard(
 
 @Composable
 private fun SimulatorCard(
+    livingPalette: LivingPaletteState,
     isActive: Boolean,
     isPlaying: Boolean,
     onToggle: (Boolean) -> Unit,
     onPlayPause: () -> Unit,
     onSeekForward: () -> Unit
 ) {
+    val toggleTrack = livingPalette.primary
+    val toggleThumb = if (toggleTrack.luminance() > 0.42f) Color.Black else Color.White
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
             .testTag("simulator_card"),
         shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = DarkSurfaceVariant),
+        colors = CardDefaults.cardColors(containerColor = DarkSurfaceVariant.copy(alpha = 0.78f)),
         border = BorderStroke(
             1.dp,
-            if (isActive) ElectricViolet.copy(alpha = 0.5f) else DarkSurfaceHighlight
+            rotatingBorderBrush(livingPalette, alpha = if (isActive) 0.72f else 0.30f, angleOffsetDeg = 180f)
         )
     ) {
         Column(
@@ -601,8 +605,8 @@ private fun SimulatorCard(
                     checked = isActive,
                     onCheckedChange = onToggle,
                     colors = SwitchDefaults.colors(
-                        checkedThumbColor = Color.Black,
-                        checkedTrackColor = ElectricViolet
+                        checkedThumbColor = toggleThumb,
+                        checkedTrackColor = toggleTrack
                     ),
                     modifier = Modifier.testTag("simulator_toggle_switch")
                 )
@@ -613,6 +617,8 @@ private fun SimulatorCard(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
+                    val primaryBtnColor = if (isPlaying) CoralRed else livingPalette.primary
+                    val primaryBtnContent = if (primaryBtnColor.luminance() > 0.42f) Color.Black else Color.White
                     Button(
                         onClick = onPlayPause,
                         modifier = Modifier
@@ -620,8 +626,8 @@ private fun SimulatorCard(
                             .height(48.dp)
                             .testTag("simulator_play_pause_button"),
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = if (isPlaying) CoralRed else NeonEmerald,
-                            contentColor = Color.Black
+                            containerColor = primaryBtnColor,
+                            contentColor = primaryBtnContent
                         ),
                         shape = RoundedCornerShape(10.dp)
                     ) {
@@ -639,15 +645,16 @@ private fun SimulatorCard(
                             .weight(1f)
                             .height(48.dp)
                             .testTag("simulator_seek_button"),
+                        border = BorderStroke(1.dp, livingPalette.secondary.copy(alpha = 0.55f)),
                         shape = RoundedCornerShape(10.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Default.FastForward,
                             contentDescription = null,
-                            tint = ElectricCyan
+                            tint = livingPalette.secondary
                         )
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text(text = "+15 сек", color = ElectricCyan)
+                        Text(text = "+15 сек", color = livingPalette.secondary)
                     }
                 }
             }

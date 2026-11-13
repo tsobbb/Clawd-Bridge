@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
@@ -83,12 +84,16 @@ import com.example.ui.components.PluginSyncCard
 import com.example.ui.theme.ClawdBridgeTheme
 import com.example.ui.theme.CoralRed
 import com.example.ui.theme.DarkSurface
-import com.example.ui.theme.DarkSurfaceHighlight
 import com.example.ui.theme.JetBrainsMonoFontFamily
+import com.example.ui.theme.LivingAuroraBackdrop
+import com.example.ui.theme.LivingPaletteState
 import com.example.ui.theme.NeonEmerald
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
+import com.example.ui.theme.rememberLivingPaletteState
+import com.example.ui.theme.rotatingBorderBrush
+import com.example.ui.theme.shimmeringHorizontalBrush
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 
@@ -155,6 +160,8 @@ fun ClawdBridgeMainApp() {
     val syncOffsetMs by MediaBridgeStateHolder.syncOffsetMs.collectAsState()
     val artworkDebugStatus by MediaBridgeStateHolder.artworkDebugStatus.collectAsState()
 
+    val livingPalette = rememberLivingPaletteState(liveState)
+
     var isNotificationAccessGranted by remember {
         mutableStateOf(NotificationRebindHelper.isNotificationAccessGranted(context))
     }
@@ -217,109 +224,132 @@ fun ClawdBridgeMainApp() {
         Toast.makeText(context, "Служба принудительно переподключена", Toast.LENGTH_SHORT).show()
     }
 
-    Scaffold(
-        modifier = Modifier
-            .fillMaxSize()
-            .testTag("main_scaffold"),
-        containerColor = MaterialTheme.colorScheme.background,
-        contentWindowInsets = WindowInsets.safeDrawing,
-        bottomBar = {
-            NavigationBar(
-                containerColor = DarkSurface,
-                tonalElevation = 0.dp
-            ) {
-                BRIDGE_TABS.forEach { tab ->
-                    val selected = selectedTab == tab.index
-                    NavigationBarItem(
-                        selected = selected,
-                        onClick = { selectedTab = tab.index },
-                        icon = {
-                            Icon(
-                                imageVector = if (selected) tab.selectedIcon else tab.unselectedIcon,
-                                contentDescription = tab.label
-                            )
-                        },
-                        label = {
-                            Text(
-                                text = tab.label,
-                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                                fontSize = 11.sp
-                            )
-                        },
-                        colors = NavigationBarItemDefaults.colors(
-                            selectedIconColor = NeonEmerald,
-                            selectedTextColor = NeonEmerald,
-                            indicatorColor = NeonEmerald.copy(alpha = 0.14f),
-                            unselectedIconColor = TextMuted,
-                            unselectedTextColor = TextSecondary
-                        ),
-                        modifier = Modifier.testTag(tab.testTag)
-                    )
-                }
-            }
-        }
-    ) { innerPadding ->
-        Column(
+    Box(modifier = Modifier.fillMaxSize()) {
+        LivingAuroraBackdrop(palette = livingPalette)
+
+        Scaffold(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(innerPadding)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            AppHeader(
-                isServerRunning = isServerRunning,
-                onRestartServer = {
-                    LocalHttpServer.start()
-                    MediaBridgeForegroundService.start(context)
-                    Toast.makeText(context, "Сервер перезапущен", Toast.LENGTH_SHORT).show()
-                }
-            )
-
-            Crossfade(
-                targetState = selectedTab,
-                animationSpec = tween(durationMillis = 180),
-                label = "bridge_tab_crossfade"
-            ) { tabIndex ->
-                when (tabIndex) {
-                    0 -> MonitorTab(
-                        liveState = liveState,
-                        artworkBitmap = artworkBitmap,
-                        isServiceConnected = isServiceConnected,
-                        isNotificationAccessGranted = isNotificationAccessGranted,
-                        isSimulatorActive = isSimulatorActive,
-                        isSimulatorPlaying = isSimulatorPlaying,
-                        onForceRebind = forceRebindAction,
-                        onToggleSimulator = { enable -> TestMediaSimulator.toggleSimulator(enable) },
-                        onPlayPauseSimulator = {
-                            if (isSimulatorPlaying) TestMediaSimulator.pause() else TestMediaSimulator.play()
-                        },
-                        onSeekForwardSimulator = {
-                            val current = TestMediaSimulator.getEstimatedPositionMs()
-                            TestMediaSimulator.seekTo(current + 15000L)
+                .testTag("main_scaffold"),
+            containerColor = Color.Transparent,
+            contentWindowInsets = WindowInsets.safeDrawing,
+            bottomBar = {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(1.dp)
+                            .background(
+                                shimmeringHorizontalBrush(
+                                    livingPalette,
+                                    alpha = if (livingPalette.isTrackActive) 0.55f else 0.25f
+                                )
+                            )
+                    )
+                    NavigationBar(
+                        containerColor = DarkSurface.copy(alpha = 0.86f),
+                        tonalElevation = 0.dp
+                    ) {
+                        BRIDGE_TABS.forEach { tab ->
+                            val selected = selectedTab == tab.index
+                            NavigationBarItem(
+                                selected = selected,
+                                onClick = { selectedTab = tab.index },
+                                icon = {
+                                    Icon(
+                                        imageVector = if (selected) tab.selectedIcon else tab.unselectedIcon,
+                                        contentDescription = tab.label
+                                    )
+                                },
+                                label = {
+                                    Text(
+                                        text = tab.label,
+                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                        fontSize = 11.sp
+                                    )
+                                },
+                                colors = NavigationBarItemDefaults.colors(
+                                    selectedIconColor = livingPalette.primary,
+                                    selectedTextColor = livingPalette.primary,
+                                    indicatorColor = livingPalette.primary.copy(alpha = 0.16f),
+                                    unselectedIconColor = TextMuted,
+                                    unselectedTextColor = TextSecondary
+                                ),
+                                modifier = Modifier.testTag(tab.testTag)
+                            )
                         }
-                    )
-                    1 -> PluginSyncCard(context = context)
-                    else -> DiagnosticsTab(
-                        context = context,
-                        isServerRunning = isServerRunning,
-                        requestCount = requestCount,
-                        activeSseClients = activeSseClients,
-                        lastRequestTimestamp = lastRequestTimestamp,
-                        syncOffsetMs = syncOffsetMs,
-                        onSyncOffsetChange = { MediaBridgeStateHolder.setSyncOffsetMs(it) },
-                        artworkDebugStatus = artworkDebugStatus,
-                        isFilterEnabled = isFilterEnabled,
-                        ignoredPackages = ignoredPackages,
-                        discoveredApps = discoveredApps,
-                        backupTargetPath = BackupFileWriter.targetFilePath,
-                        backupWrittenTime = backupWrittenTime,
-                        backupFileSize = backupFileSize,
-                        backupStatus = backupStatus,
-                        isNotificationAccessGranted = isNotificationAccessGranted,
-                        isBatteryOptIgnored = isBatteryOptIgnored,
-                        onForceRebind = forceRebindAction
-                    )
+                    }
+                }
+            }
+        ) { innerPadding ->
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                AppHeader(
+                    isServerRunning = isServerRunning,
+                    livingPalette = livingPalette,
+                    onRestartServer = {
+                        LocalHttpServer.start()
+                        MediaBridgeForegroundService.start(context)
+                        Toast.makeText(context, "Сервер перезапущен", Toast.LENGTH_SHORT).show()
+                    }
+                )
+
+                Crossfade(
+                    targetState = selectedTab,
+                    animationSpec = tween(durationMillis = 180),
+                    label = "bridge_tab_crossfade"
+                ) { tabIndex ->
+                    when (tabIndex) {
+                        0 -> MonitorTab(
+                            liveState = liveState,
+                            artworkBitmap = artworkBitmap,
+                            livingPalette = livingPalette,
+                            isServiceConnected = isServiceConnected,
+                            isNotificationAccessGranted = isNotificationAccessGranted,
+                            isSimulatorActive = isSimulatorActive,
+                            isSimulatorPlaying = isSimulatorPlaying,
+                            onForceRebind = forceRebindAction,
+                            onToggleSimulator = { enable -> TestMediaSimulator.toggleSimulator(enable) },
+                            onPlayPauseSimulator = {
+                                if (isSimulatorPlaying) TestMediaSimulator.pause() else TestMediaSimulator.play()
+                            },
+                            onSeekForwardSimulator = {
+                                val current = TestMediaSimulator.getEstimatedPositionMs()
+                                TestMediaSimulator.seekTo(current + 15000L)
+                            }
+                        )
+                        1 -> PluginSyncCard(
+                            context = context,
+                            livingPalette = livingPalette
+                        )
+                        else -> DiagnosticsTab(
+                            context = context,
+                            livingPalette = livingPalette,
+                            isServerRunning = isServerRunning,
+                            requestCount = requestCount,
+                            activeSseClients = activeSseClients,
+                            lastRequestTimestamp = lastRequestTimestamp,
+                            syncOffsetMs = syncOffsetMs,
+                            onSyncOffsetChange = { MediaBridgeStateHolder.setSyncOffsetMs(it) },
+                            artworkDebugStatus = artworkDebugStatus,
+                            isFilterEnabled = isFilterEnabled,
+                            ignoredPackages = ignoredPackages,
+                            discoveredApps = discoveredApps,
+                            backupTargetPath = BackupFileWriter.targetFilePath,
+                            backupWrittenTime = backupWrittenTime,
+                            backupFileSize = backupFileSize,
+                            backupStatus = backupStatus,
+                            isNotificationAccessGranted = isNotificationAccessGranted,
+                            isBatteryOptIgnored = isBatteryOptIgnored,
+                            onForceRebind = forceRebindAction
+                        )
+                    }
                 }
             }
         }
@@ -329,8 +359,10 @@ fun ClawdBridgeMainApp() {
 @Composable
 private fun AppHeader(
     isServerRunning: Boolean,
+    livingPalette: LivingPaletteState,
     onRestartServer: () -> Unit
 ) {
+    val activeAccent = if (livingPalette.isTrackActive) livingPalette.primary else NeonEmerald
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -353,11 +385,12 @@ private fun AppHeader(
 
         Surface(
             shape = RoundedCornerShape(12.dp),
-            color = if (isServerRunning) Color(0xFF00381B) else Color(0xFF381515),
-            border = BorderStroke(
-                1.dp,
-                if (isServerRunning) NeonEmerald.copy(alpha = 0.5f) else CoralRed.copy(alpha = 0.5f)
-            ),
+            color = if (isServerRunning) DarkSurface.copy(alpha = 0.80f) else Color(0xFF381515),
+            border = if (isServerRunning) {
+                BorderStroke(1.2.dp, rotatingBorderBrush(livingPalette, alpha = 0.72f))
+            } else {
+                BorderStroke(1.dp, CoralRed.copy(alpha = 0.6f))
+            },
             modifier = Modifier
                 .clip(RoundedCornerShape(12.dp))
                 .clickable(onClick = onRestartServer)
@@ -371,14 +404,14 @@ private fun AppHeader(
                     modifier = Modifier
                         .size(8.dp)
                         .clip(CircleShape)
-                        .background(if (isServerRunning) NeonEmerald else CoralRed)
+                        .background(if (isServerRunning) activeAccent else CoralRed)
                 )
                 Text(
                     text = if (isServerRunning) "PORT 44444" else "OFFLINE",
                     style = MaterialTheme.typography.labelSmall.copy(
                         fontFamily = JetBrainsMonoFontFamily,
                         fontWeight = FontWeight.Bold,
-                        color = if (isServerRunning) NeonEmerald else CoralRed
+                        color = if (isServerRunning) activeAccent else CoralRed
                     )
                 )
             }

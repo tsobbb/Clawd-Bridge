@@ -6,6 +6,7 @@ import android.media.MediaMetadata
 import android.media.session.MediaController
 import android.media.session.PlaybackState
 import android.os.SystemClock
+import com.example.media.ArtworkCatalogResolver
 import com.example.media.ArtworkExtractor
 import com.example.media.ExtractedArtwork
 import com.example.model.NowPlayingData
@@ -22,14 +23,14 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Thread-safe centralized state manager for media sessions, album artwork,
- * real-time playback extrapolation, and SSE event broadcasting.
- * Adheres strictly to monotonic SystemClock.elapsedRealtime() clock rules (ТЗ v1.3).
+ * Thread-safe centralized state manager for media sessions, multi-source album artwork,
+ * procedural fallback palettes, real-time playback extrapolation, and SSE broadcasting.
  */
 object MediaBridgeStateHolder {
 
@@ -38,7 +39,8 @@ object MediaBridgeStateHolder {
         val uriFallback: String?,
         val notifTitle: String,
         val debugNote: String,
-        val revision: Long
+        val revision: Long,
+        val timestampMs: Long
     )
 
     private val ioScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -64,6 +66,13 @@ object MediaBridgeStateHolder {
     private var currentArtworkBytes: ByteArray? = null
 
     private val artworkLock = Any()
+
+    // Track-level in-memory LRU cache so pausing/buffering recovers local/notif artwork in 0 ms
+    private val trackArtworkCache = object : LinkedHashMap<String, ExtractedArtwork>(24, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ExtractedArtwork>?): Boolean {
+            return size > 24
+        }
+    }
 
     @Volatile
     private var cachedTrackKey: String = ""
@@ -163,7 +172,8 @@ object MediaBridgeStateHolder {
                 uriFallback = notificationArtUri,
                 notifTitle = notificationTitle,
                 debugNote = notificationDebugNote,
-                revision = rev
+                revision = rev,
+                timestampMs = SystemClock.elapsedRealtime()
             )
         }
         activeController.set(controller)
@@ -186,7 +196,8 @@ object MediaBridgeStateHolder {
             uriFallback = uriFallback,
             notifTitle = notifTitle,
             debugNote = debugNote,
-            revision = rev
+            revision = rev,
+            timestampMs = SystemClock.elapsedRealtime()
         )
         val currentPkg = activeController.get()?.packageName
         if (currentPkg == packageName) {
@@ -310,6 +321,11 @@ object MediaBridgeStateHolder {
             val packageName = controller.packageName ?: "unknown"
 
             val extractedArt = resolveArtwork(packageName, artist, title, album, metadata)
+            val fallbackPalette = if (extractedArt == null) {
+                ArtworkExtractor.generateTrackPalette(artist, title)
+            } else {
+                extractedArt.accentColorsHex
+            }
 
             val snapshot = NowPlayingData(
                 hasMedia = true,
@@ -323,8 +339,8 @@ object MediaBridgeStateHolder {
                 playbackSpeed = speed,
                 isPlaying = true,
                 positionKnown = positionKnown,
-                accentColorHex = extractedArt?.accentColorHex ?: NowPlayingData.DEFAULT_ACCENT_HEX,
-                accentColorsHex = extractedArt?.accentColorsHex ?: NowPlayingData.DEFAULT_ACCENT_COLORS,
+                accentColorHex = extractedArt?.accentColorHex ?: fallbackPalette.first(),
+                accentColorsHex = fallbackPalette,
                 hasArtwork = extractedArt != null,
                 timestamp = System.currentTimeMillis()
             )
@@ -372,17 +388,22 @@ object MediaBridgeStateHolder {
         val trackKey = "$packageName|$artist|$title|$album"
         val inlineBitmap = ArtworkExtractor.extractInlineBitmap(metadata)
         val metaArtUri = ArtworkExtractor.extractArtworkUri(metadata)
-        val notifEntry = notificationArtMap[packageName]?.takeIf { entry ->
-            (entry.notifTitle.isBlank() || title.isBlank() ||
-                entry.notifTitle.equals(title, ignoreCase = true) ||
-                title.contains(entry.notifTitle, ignoreCase = true) ||
-                entry.notifTitle.contains(title, ignoreCase = true))
-        }
+        val notifEntry = notificationArtMap[packageName]
+        val validNotifBmp = notifEntry?.bitmap?.takeIf { !it.isRecycled }
+        // Accept notification bitmap if it matches session/title OR is recent from the active player
+        val notifEntryUsable = notifEntry != null && (
+            notifEntry.notifTitle.isBlank() ||
+                title.isBlank() ||
+                notifEntry.notifTitle.equals(title, ignoreCase = true) ||
+                title.contains(notifEntry.notifTitle, ignoreCase = true) ||
+                notifEntry.notifTitle.contains(title, ignoreCase = true) ||
+                (SystemClock.elapsedRealtime() - notifEntry.timestampMs) < 15_000L
+            )
         val effectiveUri = metaArtUri ?: notifEntry?.uriFallback
 
         val sourceKey = when {
             inlineBitmap != null -> "$trackKey|inline|${inlineBitmap.generationId}"
-            notifEntry?.bitmap != null -> "$trackKey|notif|${notifEntry.revision}"
+            notifEntryUsable && validNotifBmp != null -> "$trackKey|notif|${notifEntry!!.revision}"
             !effectiveUri.isNullOrBlank() -> "$trackKey|uri|$effectiveUri"
             else -> "$trackKey|catalog"
         }
@@ -391,15 +412,22 @@ object MediaBridgeStateHolder {
             if (cachedTrackKey != trackKey) {
                 cachedTrackKey = trackKey
                 cachedArtworkSourceKey = ""
-                cachedExtractedArtwork = null
+                cachedExtractedArtwork = trackArtworkCache[trackKey]
+                if (cachedExtractedArtwork != null) {
+                    currentArtworkBytes = cachedExtractedArtwork!!.jpegBytes
+                    _artworkBitmap.value = cachedExtractedArtwork!!.thumbnail
+                } else {
+                    currentArtworkBytes = null
+                    _artworkBitmap.value = null
+                }
                 lastAttemptedUriKey = ""
                 inFlightArtKey = ""
                 catalogFallbackAttemptedKey = ""
-            } else if (cachedExtractedArtwork != null && (cachedArtworkSourceKey == sourceKey || inlineBitmap == null && notifEntry?.bitmap == null)) {
+            } else if (cachedExtractedArtwork != null && (cachedArtworkSourceKey == sourceKey || (inlineBitmap == null && !notifEntryUsable))) {
                 return cachedExtractedArtwork
             }
 
-            // 1. Inline MediaMetadata Bitmap
+            // 1. Inline MediaMetadata Bitmap (highest priority)
             if (inlineBitmap != null) {
                 val extracted = ArtworkExtractor.fromBitmap(inlineBitmap)
                 if (extracted != null) {
@@ -408,60 +436,67 @@ object MediaBridgeStateHolder {
                 }
             }
 
-            // 2. Notification MediaStyle Icon / Bitmap
-            val notifBmp = notifEntry?.bitmap?.takeIf { !it.isRecycled }
-            if (notifBmp != null) {
-                val extracted = ArtworkExtractor.fromBitmap(notifBmp)
+            // 2. Notification MediaStyle Icon / Bitmap (no brittle rejection on formatted titles)
+            if (notifEntryUsable && validNotifBmp != null) {
+                val extracted = ArtworkExtractor.fromBitmap(validNotifBmp)
                 if (extracted != null) {
-                    applyResolvedArtworkLocked(trackKey, sourceKey, extracted, notifEntry.debugNote)
+                    applyResolvedArtworkLocked(trackKey, sourceKey, extracted, notifEntry!!.debugNote)
                     return extracted
                 }
             }
 
-            // 3. Async URI (content://, file://, https://) + Public Catalog Fallback
+            // Return LRU cached cover immediately if already fetched
+            if (cachedExtractedArtwork != null) {
+                return cachedExtractedArtwork
+            }
+
+            // 3. Async URI (content://, file://, https://) + 5-Provider Public Waterfall
             val ctx = appContext
-            if (ctx != null && !effectiveUri.isNullOrBlank()) {
+            if (!effectiveUri.isNullOrBlank() && ctx != null) {
                 val uriRequestKey = "$trackKey|$effectiveUri"
                 if (lastAttemptedUriKey != uriRequestKey && inFlightArtKey != uriRequestKey) {
                     inFlightArtKey = uriRequestKey
                     lastAttemptedUriKey = uriRequestKey
-                    _artworkDebugStatus.value = "Загрузка URI (${effectiveUri.substringBefore(':')}...)"
-                    fetchArtworkAsync(
+                    _artworkDebugStatus.value = "Загрузка URI + каскад (${effectiveUri.substringBefore(':')}...)"
+                    fetchArtworkWithWaterfallAsync(
                         context = ctx,
+                        packageName = packageName,
                         trackKey = trackKey,
                         sourceKey = sourceKey,
                         artUri = effectiveUri,
                         artist = artist,
                         title = title,
+                        album = album,
                         requestKey = uriRequestKey,
                         metaSummary = ArtworkExtractor.summarizeMetadataKeys(metadata),
                         notifDebug = notifEntry?.debugNote ?: "notif=none"
                     )
                 }
-                return cachedExtractedArtwork
+                return null
             }
 
-            // 4. Local sources all absent/unreadable -> try Public Catalog Fallback once per track
-            if (ctx != null && catalogFallbackAttemptedKey != trackKey && inFlightArtKey != trackKey && (artist.isNotBlank() || title.isNotBlank())) {
+            // 4. Local sources absent/blocked -> run 5-Provider Waterfall once per track
+            if (catalogFallbackAttemptedKey != trackKey && inFlightArtKey != trackKey && (artist.isNotBlank() || title.isNotBlank())) {
                 catalogFallbackAttemptedKey = trackKey
                 inFlightArtKey = trackKey
                 val metaSummary = ArtworkExtractor.summarizeMetadataKeys(metadata)
                 val notifSummary = notifEntry?.debugNote ?: "notif=none"
-                _artworkDebugStatus.value = "Поиск обложки ($metaSummary; $notifSummary)"
-                fetchCatalogFallbackAsync(
+                _artworkDebugStatus.value = "Поиск по каталогам..."
+                fetchCatalogWaterfallAsync(
+                    context = ctx,
+                    packageName = packageName,
                     trackKey = trackKey,
                     sourceKey = sourceKey,
                     artist = artist,
                     title = title,
+                    album = album,
                     metaSummary = metaSummary,
                     notifSummary = notifSummary
                 )
-            } else if (cachedExtractedArtwork == null && inFlightArtKey.isBlank()) {
-                cachedArtworkSourceKey = sourceKey
-                currentArtworkBytes = null
-                _artworkBitmap.value = null
+            } else if (inFlightArtKey.isBlank()) {
+                _artworkDebugStatus.value = "Генеративная палитра (${ArtworkExtractor.summarizeMetadataKeys(metadata)})"
             }
-            return cachedExtractedArtwork
+            return null
         }
     }
 
@@ -474,18 +509,21 @@ object MediaBridgeStateHolder {
         cachedTrackKey = trackKey
         cachedArtworkSourceKey = sourceKey
         cachedExtractedArtwork = extracted
+        trackArtworkCache[trackKey] = extracted
         currentArtworkBytes = extracted.jpegBytes
         _artworkBitmap.value = extracted.thumbnail
         _artworkDebugStatus.value = debugNote
     }
 
-    private fun fetchArtworkAsync(
+    private fun fetchArtworkWithWaterfallAsync(
         context: Context,
+        packageName: String,
         trackKey: String,
         sourceKey: String,
         artUri: String,
         artist: String,
         title: String,
+        album: String,
         requestKey: String,
         metaSummary: String,
         notifDebug: String
@@ -496,12 +534,19 @@ object MediaBridgeStateHolder {
             var finalNote = uriRes.debugNote
 
             if (finalArtwork == null && (artist.isNotBlank() || title.isNotBlank())) {
-                val catalogRes = ArtworkExtractor.fetchPublicCatalogArtwork(artist, title)
+                val preferSc = packageName.lowercase(Locale.US).contains("soundcloud")
+                val catalogRes = ArtworkCatalogResolver.resolveCoverWaterfall(
+                    context = context,
+                    rawArtist = artist,
+                    rawTitle = title,
+                    rawAlbum = album,
+                    preferSoundCloudFirst = preferSc
+                )
                 if (catalogRes.artwork != null) {
                     finalArtwork = catalogRes.artwork
                     finalNote = "${catalogRes.debugNote} (после ${uriRes.debugNote})"
                 } else {
-                    finalNote = "${uriRes.debugNote}; ${catalogRes.debugNote}; $metaSummary; $notifDebug"
+                    finalNote = "Генеративная палитра (${uriRes.debugNote}; ${catalogRes.debugNote}; $metaSummary; $notifDebug)"
                 }
             }
 
@@ -525,16 +570,26 @@ object MediaBridgeStateHolder {
         }
     }
 
-    private fun fetchCatalogFallbackAsync(
+    private fun fetchCatalogWaterfallAsync(
+        context: Context?,
+        packageName: String,
         trackKey: String,
         sourceKey: String,
         artist: String,
         title: String,
+        album: String,
         metaSummary: String,
         notifSummary: String
     ) {
         ioScope.launch {
-            val catalogRes = ArtworkExtractor.fetchPublicCatalogArtwork(artist, title)
+            val preferSc = packageName.lowercase(Locale.US).contains("soundcloud")
+            val catalogRes = ArtworkCatalogResolver.resolveCoverWaterfall(
+                context = context,
+                rawArtist = artist,
+                rawTitle = title,
+                rawAlbum = album,
+                preferSoundCloudFirst = preferSc
+            )
             var shouldRefresh = false
             synchronized(artworkLock) {
                 if (inFlightArtKey == trackKey) {
@@ -546,7 +601,7 @@ object MediaBridgeStateHolder {
                         applyResolvedArtworkLocked(trackKey, sourceKey, art, "${catalogRes.debugNote} ($metaSummary; $notifSummary)")
                         shouldRefresh = true
                     } else {
-                        _artworkDebugStatus.value = "${catalogRes.debugNote} ($metaSummary; $notifSummary)"
+                        _artworkDebugStatus.value = "Генеративная палитра (${catalogRes.debugNote}; $metaSummary; $notifSummary)"
                     }
                 }
             }

@@ -1,6 +1,7 @@
 package com.example.server
 
 import android.util.Log
+import com.example.lyrics.LyricsCatalogResolver
 import com.example.state.MediaBridgeStateHolder
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -14,6 +15,7 @@ import java.io.OutputStream
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.URLDecoder
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -22,7 +24,7 @@ import java.util.concurrent.atomic.AtomicInteger
 /**
  * Native concurrent HTTP + SSE server running on 127.0.0.1:44444.
  * Uses cached thread pool so long-lived SSE /events connections never block
- * /now-playing or /artwork requests.
+ * /now-playing, /artwork, or /lyrics requests.
  */
 object LocalHttpServer {
 
@@ -127,6 +129,7 @@ object LocalHttpServer {
             val method = if (parts.isNotEmpty()) parts[0] else "GET"
             val rawPath = if (parts.size > 1) parts[1] else "/"
             val path = rawPath.substringBefore("?")
+            val query = rawPath.substringAfter("?", "")
 
             var line: String? = input.readLine()
             while (!line.isNullOrEmpty()) {
@@ -137,6 +140,7 @@ object LocalHttpServer {
                 method.equals("OPTIONS", ignoreCase = true) -> sendOptionsResponse(output)
                 path == "/now-playing" || path == "/" -> sendNowPlayingResponse(output)
                 path == "/artwork" -> sendArtworkResponse(output)
+                path == "/lyrics" -> sendLyricsResponse(output, query)
                 path == "/events" -> handleSseStream(socket, output)
                 else -> sendNotFoundResponse(output, path)
             }
@@ -146,6 +150,52 @@ object LocalHttpServer {
             try {
                 socket.close()
             } catch (ignored: Exception) {}
+        }
+    }
+
+    private fun sendLyricsResponse(output: OutputStream, query: String) {
+        val params = parseQueryParams(query)
+        val snap = MediaBridgeStateHolder.getCurrentSnapshot()
+        val artist = params["artist"].orEmpty().ifBlank { snap.artist }
+        val title = params["title"].orEmpty().ifBlank { snap.title }
+
+        val result = LyricsCatalogResolver.resolveLyrics(artist, title)
+        val bodyBytes = result.toJsonString().toByteArray(Charsets.UTF_8)
+
+        val header = StringBuilder()
+            .append("HTTP/1.1 200 OK\r\n")
+            .append("Content-Type: application/json; charset=utf-8\r\n")
+            .append("Content-Length: ").append(bodyBytes.size).append("\r\n")
+            .append("Connection: close\r\n")
+            .append("Access-Control-Allow-Origin: *\r\n")
+            .append("Access-Control-Allow-Methods: GET, OPTIONS\r\n")
+            .append("Cache-Control: no-cache, no-store, must-revalidate\r\n")
+            .append("\r\n")
+
+        output.write(header.toString().toByteArray(Charsets.US_ASCII))
+        output.write(bodyBytes)
+        output.flush()
+    }
+
+    internal fun parseQueryParams(query: String): Map<String, String> {
+        if (query.isBlank()) return emptyMap()
+        val result = mutableMapOf<String, String>()
+        query.split("&").forEach { pair ->
+            val idx = pair.indexOf('=')
+            if (idx > 0) {
+                val key = tryDecodeUrl(pair.substring(0, idx))
+                val value = tryDecodeUrl(pair.substring(idx + 1))
+                result[key] = value
+            }
+        }
+        return result
+    }
+
+    private fun tryDecodeUrl(s: String): String {
+        return try {
+            URLDecoder.decode(s, "UTF-8")
+        } catch (_: Throwable) {
+            s
         }
     }
 

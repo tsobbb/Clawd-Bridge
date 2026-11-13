@@ -18,12 +18,10 @@ import android.media.MediaMetadata
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
-import java.net.URLEncoder
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.min
@@ -54,7 +52,7 @@ object ArtworkExtractor {
     private const val MAX_DECODE_DIMENSION = 512
     private const val MAX_REMOTE_IMAGE_BYTES = 5 * 1024 * 1024
     private const val JPEG_QUALITY = 84
-    private const val BROWSER_USER_AGENT =
+    const val BROWSER_USER_AGENT =
         "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
     private const val DEFAULT_ACCENT_INT = 0xFF00E5FF.toInt()
     private val DEFAULT_PALETTE_INTS = listOf(0xFF00E5FF.toInt(), 0xFF3B82F6.toInt(), 0xFF7C3AED.toInt())
@@ -65,6 +63,49 @@ object ArtworkExtractor {
     fun extract(metadata: MediaMetadata?): ExtractedArtwork? {
         val rawBitmap = extractInlineBitmap(metadata) ?: return null
         return fromBitmap(rawBitmap)
+    }
+
+    /**
+     * Generates a deterministic, vivid 3-color gradient triad from (artist + title) hash
+     * when a rare track genuinely has no cover anywhere (~1% fallback), avoiding dull defaults.
+     */
+    fun generateTrackPalette(artist: String, title: String): List<String> {
+        val seedStr = "${artist.trim().lowercase(Locale.US)}|${title.trim().lowercase(Locale.US)}"
+        if (seedStr == "|") {
+            return listOf("#00E5FF", "#3B82F6", "#8B5CF6")
+        }
+        val hash = seedStr.hashCode()
+        val unsigned = hash.toLong() and 0xFFFFFFFFL
+        val baseHue = (unsigned % 360L).toFloat()
+        val sat1 = 0.68f + ((unsigned shr 8) % 20L) / 100f
+        val val1 = 0.84f + ((unsigned shr 16) % 11L) / 100f
+
+        val c1 = hsvColor(baseHue, sat1, val1)
+        val c2 = hsvColor((baseHue + 38f) % 360f, (sat1 - 0.05f).coerceIn(0.55f, 0.92f), (val1 * 0.96f).coerceIn(0.70f, 0.96f))
+        val c3 = hsvColor((baseHue + 318f) % 360f, (sat1 + 0.04f).coerceIn(0.58f, 0.95f), (val1 * 0.84f).coerceIn(0.65f, 0.92f))
+        return listOf(toHexString(c1), toHexString(c2), toHexString(c3))
+    }
+
+    private fun hsvColor(hue: Float, sat: Float, value: Float): Int {
+        val h = ((hue % 360f) + 360f) % 360f
+        val s = sat.coerceIn(0f, 1f)
+        val v = value.coerceIn(0f, 1f)
+        // Pure JVM-safe HSV->RGB conversion (also safe on unit tests without Android graphics stub issues)
+        val c = v * s
+        val x = c * (1f - abs((h / 60f) % 2f - 1f))
+        val m = v - c
+        val (rf, gf, bf) = when {
+            h < 60f -> Triple(c, x, 0f)
+            h < 120f -> Triple(x, c, 0f)
+            h < 180f -> Triple(0f, c, x)
+            h < 240f -> Triple(0f, x, c)
+            h < 300f -> Triple(x, 0f, c)
+            else -> Triple(c, 0f, x)
+        }
+        val r = ((rf + m) * 255f).toInt().coerceIn(0, 255)
+        val g = ((gf + m) * 255f).toInt().coerceIn(0, 255)
+        val b = ((bf + m) * 255f).toInt().coerceIn(0, 255)
+        return (0xFF shl 24) or (r shl 16) or (g shl 8) or b
     }
 
     /**
@@ -82,7 +123,6 @@ object ArtworkExtractor {
             if (isValidCoverBitmap(candidate)) return candidate
         }
 
-        // Check MediaDescription iconBitmap
         val descBmp = try {
             metadata.description?.iconBitmap
         } catch (_: Throwable) {
@@ -90,7 +130,6 @@ object ArtworkExtractor {
         }
         if (isValidCoverBitmap(descBmp)) return descBmp
 
-        // Check any custom art/icon keys present in MediaMetadata
         val allKeys = try {
             metadata.keySet()
         } catch (_: Throwable) {
@@ -177,15 +216,11 @@ object ArtworkExtractor {
         }
     }
 
-    /**
-     * Extracts album artwork Bitmap or fallback URI from an active Notification.
-     */
     fun probeBitmapFromNotification(context: Context, notification: Notification?): NotificationArtProbe {
         if (notification == null) return NotificationArtProbe(null, null, "notif=null")
         val notes = mutableListOf<String>()
         var fallbackUri: String? = null
 
-        // 1. Check Notification.getLargeIcon() (API 23+)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             val largeIcon = notification.getLargeIcon()
             if (largeIcon != null) {
@@ -200,7 +235,6 @@ object ArtworkExtractor {
             }
         }
 
-        // 2. Check extras (known keys + any extra Bitmap/Icon/URI)
         val extras: Bundle? = notification.extras
         if (extras != null) {
             val priorityKeys = listOf(
@@ -237,10 +271,6 @@ object ArtworkExtractor {
             uriFallback = fallbackUri,
             debugNote = if (notes.isEmpty()) "notif=empty" else notes.joinToString(";")
         )
-    }
-
-    fun extractBitmapFromNotification(context: Context, notification: Notification?): Bitmap? {
-        return probeBitmapFromNotification(context, notification).bitmap
     }
 
     @Suppress("DEPRECATION")
@@ -318,10 +348,6 @@ object ArtworkExtractor {
         return bitmap != null && !bitmap.isRecycled && bitmap.width >= 32 && bitmap.height >= 32
     }
 
-    /**
-     * Loads and extracts artwork asynchronously from content://, file://, android.resource://, or http(s):// URIs.
-     * Must be called off the main thread.
-     */
     fun loadFromUriDetailed(context: Context, uriString: String): UriArtLoadResult {
         val lower = uriString.lowercase(Locale.US)
         if (lower.startsWith("http://") || lower.startsWith("https://")) {
@@ -346,7 +372,6 @@ object ArtworkExtractor {
             return UriArtLoadResult(null, lastNote)
         }
 
-        // Local URI: content://, file://, android.resource://
         return try {
             val uri = Uri.parse(uriString)
             val streamBytes = context.contentResolver.openInputStream(uri)?.use { stream ->
@@ -384,102 +409,17 @@ object ArtworkExtractor {
         }
     }
 
-    /**
-     * Public music cover fallback used ONLY when local MediaMetadata and Notification
-     * provide no readable bitmap/URI (for example when a player blocks cross-app content:// grants).
-     */
-    fun fetchPublicCatalogArtwork(artist: String, title: String): UriArtLoadResult {
-        val cleanTitle = cleanTrackQuery(title)
-        val cleanArtist = cleanTrackQuery(artist)
-        val query = listOf(cleanArtist, cleanTitle).filter { it.isNotBlank() }.joinToString(" ").trim()
-        if (query.isBlank()) return UriArtLoadResult(null, "fallback:empty_query")
-
-        // 1. Try Deezer public track search API
-        val deezerResult = queryDeezerArtworkUrl(query)
-        if (deezerResult != null) {
-            val (bytes, httpNote) = downloadHttpBytes(deezerResult)
-            if (bytes != null && bytes.isNotEmpty()) {
-                val decoded = decodeSampledBitmap(bytes, MAX_DECODE_DIMENSION)
-                val extracted = decoded?.let { fromBitmap(it) }
-                if (extracted != null) {
-                    return UriArtLoadResult(extracted, "fallback:deezer ok")
-                }
-            } else {
-                // Continue to iTunes on image failure
-                val _unused = httpNote
-            }
-        }
-
-        // 2. Try iTunes Search API
-        val itunesUrl = queryItunesArtworkUrl(query)
-        if (itunesUrl != null) {
-            val (bytes, _) = downloadHttpBytes(itunesUrl)
-            if (bytes != null && bytes.isNotEmpty()) {
-                val decoded = decodeSampledBitmap(bytes, MAX_DECODE_DIMENSION)
-                val extracted = decoded?.let { fromBitmap(it) }
-                if (extracted != null) {
-                    return UriArtLoadResult(extracted, "fallback:itunes ok")
-                }
-            }
-        }
-
-        return UriArtLoadResult(null, "fallback:not_found")
-    }
-
-    private fun cleanTrackQuery(raw: String): String {
-        return raw
-            .replace(Regex("""\[[^\]]*]"""), " ")
-            .replace(Regex("""\((feat\.|ft\.|prod\.|official|audio|video)[^)]*\)""", RegexOption.IGNORE_CASE), " ")
-            .replace(Regex("""\s+"""), " ")
-            .trim()
-    }
-
-    private fun queryDeezerArtworkUrl(query: String): String? {
-        return try {
-            val encoded = URLEncoder.encode(query, "UTF-8")
-            val (bytes, _) = downloadHttpBytes("https://api.deezer.com/search?q=$encoded&limit=1")
-            if (bytes == null) return null
-            val root = JSONObject(String(bytes, Charsets.UTF_8))
-            val data = root.optJSONArray("data") ?: return null
-            if (data.length() == 0) return null
-            val track = data.optJSONObject(0) ?: return null
-            val album = track.optJSONObject("album") ?: return null
-            album.optString("cover_medium")
-                .ifBlank { album.optString("cover_big") }
-                .ifBlank { album.optString("cover") }
-                .takeIf { it.isNotBlank() }
-        } catch (_: Throwable) {
-            null
-        }
-    }
-
-    private fun queryItunesArtworkUrl(query: String): String? {
-        return try {
-            val encoded = URLEncoder.encode(query, "UTF-8")
-            val (bytes, _) = downloadHttpBytes("https://itunes.apple.com/search?term=$encoded&media=music&limit=1")
-            if (bytes == null) return null
-            val root = JSONObject(String(bytes, Charsets.UTF_8))
-            val results = root.optJSONArray("results") ?: return null
-            if (results.length() == 0) return null
-            val item = results.optJSONObject(0) ?: return null
-            val rawUrl = item.optString("artworkUrl100").ifBlank { item.optString("artworkUrl60") }
-            if (rawUrl.isBlank()) return null
-            rawUrl.replace("100x100bb", "300x300bb").replace("60x60bb", "300x300bb")
-        } catch (_: Throwable) {
-            null
-        }
-    }
-
-    private fun downloadHttpBytes(urlString: String): Pair<ByteArray?, String> {
+    internal fun downloadHttpBytes(urlString: String, timeoutMs: Int = 4000): Pair<ByteArray?, String> {
         var conn: HttpURLConnection? = null
         return try {
             conn = (URL(urlString).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 4500
-                readTimeout = 4500
+                connectTimeout = timeoutMs
+                readTimeout = timeoutMs
                 instanceFollowRedirects = true
                 requestMethod = "GET"
                 setRequestProperty("User-Agent", BROWSER_USER_AGENT)
-                setRequestProperty("Accept", "image/avif,image/webp,image/apng,image/*,application/json;q=0.9,*/*;q=0.8")
+                setRequestProperty("Accept", "image/avif,image/webp,image/apng,image/*,application/json,text/html;q=0.9,*/*;q=0.8")
+                setRequestProperty("Accept-Language", "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7")
             }
             val code = conn.responseCode
             if (code !in 200..299) {
@@ -511,7 +451,7 @@ object ArtworkExtractor {
         return out.toByteArray()
     }
 
-    private fun decodeSampledBitmap(bytes: ByteArray, maxDim: Int): Bitmap? {
+    internal fun decodeSampledBitmap(bytes: ByteArray, maxDim: Int = MAX_DECODE_DIMENSION): Bitmap? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
@@ -528,10 +468,6 @@ object ArtworkExtractor {
         return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, decodeOpts)
     }
 
-    /**
-     * Processes any source Bitmap into a normalized 160x160 JPEG thumbnail
-     * plus a harmonious 3-color dark-UI gradient accent palette.
-     */
     fun fromBitmap(rawBitmap: Bitmap): ExtractedArtwork? {
         if (rawBitmap.isRecycled || rawBitmap.width <= 0 || rawBitmap.height <= 0) {
             return null
@@ -569,7 +505,6 @@ object ArtworkExtractor {
         }
         canvas.drawRect(0f, 0f, size.toFloat(), size.toFloat(), bgPaint)
 
-        // Concentric vinyl ring accent
         val ringPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
             strokeWidth = 4f
@@ -591,10 +526,6 @@ object ArtworkExtractor {
         )
     }
 
-    /**
-     * Safely center-crops and scales any source Bitmap (including API 26+ HARDWARE bitmaps)
-     * into a mutable software ARGB_8888 square thumbnail so pixel sampling never throws.
-     */
     internal fun createSquareThumbnail(source: Bitmap, targetSize: Int): Bitmap {
         val softwareSource = ensureSoftwareArgb8888(source)
         val minSide = min(softwareSource.width, softwareSource.height)
@@ -632,10 +563,6 @@ object ArtworkExtractor {
         return extractAccentPalette(bitmap).firstOrNull() ?: DEFAULT_ACCENT_INT
     }
 
-    /**
-     * Computes 3 harmonious dominant accent colors suited for dark UI borders and gradients.
-     * Handles both saturated colorful album covers and monochrome/B&W covers gracefully.
-     */
     internal fun extractAccentPalette(bitmap: Bitmap): List<Int> {
         val sw = ensureSoftwareArgb8888(bitmap)
         val w = sw.width
@@ -645,7 +572,6 @@ object ArtworkExtractor {
         val stepX = (w / 20).coerceAtLeast(1)
         val stepY = (h / 20).coerceAtLeast(1)
 
-        // Bucket by 12-degree hue bins (30 buckets)
         val binWeight = FloatArray(30)
         val binRed = FloatArray(30)
         val binGreen = FloatArray(30)
@@ -709,7 +635,6 @@ object ArtworkExtractor {
             return DEFAULT_PALETTE_INTS
         }
 
-        // Monochrome / B&W cover: derive an atmospheric metallic/rosy-slate triad
         if (meanSat < 0.10f) {
             val rMean = avgR / avgCount
             val gMean = avgG / avgCount

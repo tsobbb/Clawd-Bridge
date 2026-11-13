@@ -182,4 +182,61 @@ class ExampleUnitTest {
         assertEquals(5000L, com.example.state.MediaBridgeStateHolder.applyOffset(4800L, 5000L, 500))
         assertEquals(0L, com.example.state.MediaBridgeStateHolder.applyOffset(200L, 0L, -500))
     }
+
+    @Test
+    fun `verify ArtworkExtractor generateTrackPalette returns vivid deterministic 3-color triad`() {
+        val triadA1 = com.example.media.ArtworkExtractor.generateTrackPalette("VILLIAN & madk1d", "ДИНАСТИЯ")
+        val triadA2 = com.example.media.ArtworkExtractor.generateTrackPalette("  villian & madk1d ", "династия")
+        val triadB = com.example.media.ArtworkExtractor.generateTrackPalette("дмитрий уткин", "ХЭППИ ХАУС")
+
+        assertEquals(3, triadA1.size)
+        assertEquals(triadA1, triadA2)
+        assertTrue(triadA1.all { it.matches(Regex("^#[0-9A-F]{6}$")) })
+        assertFalse("Different tracks must generate distinct triads", triadA1 == triadB)
+    }
+
+    @Test
+    fun `verify ArtworkCatalogResolver cleans SoundCloud tags and splits embedded artist title`() {
+        val spec = com.example.media.ArtworkCatalogResolver.buildTrackQuerySpec(
+            rawArtist = "sc_reuploader",
+            rawTitle = "VILLIAN & madk1d - ДИНАСТИЯ (prod. by bassgod) [slowed + reverb]"
+        )
+        assertEquals("VILLIAN & madk1d", spec.artist)
+        assertEquals("ДИНАСТИЯ", spec.title)
+        assertTrue(spec.searchQueries.any { it.contains("VILLIAN") && it.contains("ДИНАСТИЯ") })
+        assertTrue(com.example.media.ArtworkCatalogResolver.isReasonableMatch(spec, "madk1d", "ДИНАСТИЯ"))
+        assertFalse(com.example.media.ArtworkCatalogResolver.isReasonableMatch(spec, "Completely Other", "Random Song"))
+    }
+
+    @Test
+    fun `verify LyricsCatalogResolver parses synced LRC timestamps and Genius HTML`() {
+        val lrc = """
+            [00:12.34]Первая строка
+            [01:05.5][01:20.00]Припев
+            [00:04.100]Интро
+        """.trimIndent()
+        val parsed = com.example.lyrics.LyricsCatalogResolver.parseLrcLines(lrc)
+        assertEquals(4, parsed.size)
+        assertEquals(4100L, parsed[0].timeMs)
+        assertEquals("Интро", parsed[0].text)
+        assertEquals(12340L, parsed[1].timeMs)
+        assertEquals("Первая строка", parsed[1].text)
+        assertEquals(65500L, parsed[2].timeMs)
+        assertEquals("Припев", parsed[2].text)
+        assertEquals(80000L, parsed[3].timeMs)
+
+        val html = """<html><body><div data-lyrics-container="true">Line 1<br/>Line &amp; 2<p>Line 3</p></div></body></html>"""
+        val extracted = com.example.lyrics.LyricsCatalogResolver.extractGeniusHtmlLyrics(html)
+        assertTrue(extracted.contains("Line 1"))
+        assertTrue(extracted.contains("Line & 2"))
+        assertTrue(extracted.contains("Line 3"))
+    }
+
+    @Test
+    fun `verify LocalHttpServer parses lyrics query params cleanly`() {
+        val params = LocalHttpServer.parseQueryParams("artist=Juice%20WRLD&title=Lean+Wit+Me")
+        assertEquals("Juice WRLD", params["artist"])
+        assertEquals("Lean Wit Me", params["title"])
+        assertTrue(LocalHttpServer.parseQueryParams("").isEmpty())
+    }
 }
