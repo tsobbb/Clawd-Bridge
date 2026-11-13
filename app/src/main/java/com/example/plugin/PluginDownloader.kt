@@ -58,6 +58,7 @@ object PluginDownloader {
     private const val CACHE_SUBDIR = "plugins"
 
     private val knownTelegramPackages = listOf(
+        "by.aprelteam.gram",
         "com.aprelgram.messenger",
         "org.aprelgram.messenger",
         "app.aprelgram.messenger",

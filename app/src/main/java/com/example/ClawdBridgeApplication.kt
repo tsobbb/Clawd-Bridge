@@ -6,6 +6,7 @@ import com.example.filter.AppFilterManager
 import com.example.server.LocalHttpServer
 import com.example.service.MediaBridgeForegroundService
 import com.example.service.NotificationRebindHelper
+import com.example.state.MediaBridgeStateHolder
 
 class ClawdBridgeApplication : Application() {
 
@@ -13,8 +14,9 @@ class ClawdBridgeApplication : Application() {
         super.onCreate()
         Log.i("ClawdBridgeApp", "Initializing Clawd Bridge...")
 
-        // 0. Initialize optional App Filter (disabled and empty by default)
+        // 0. Initialize ApplicationContext singletons
         AppFilterManager.init(this)
+        MediaBridgeStateHolder.init(this)
 
         // 1. Start zero-overhead concurrent HTTP/SSE server
         LocalHttpServer.start()

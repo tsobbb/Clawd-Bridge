@@ -112,6 +112,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
 
         AppFilterManager.init(this)
+        MediaBridgeStateHolder.init(this)
         LocalHttpServer.start()
         MediaBridgeForegroundService.start(this)
         NotificationRebindHelper.rebindService(this)
@@ -151,6 +152,7 @@ fun ClawdBridgeMainApp() {
     val isFilterEnabled by AppFilterManager.isFilterEnabled.collectAsState()
     val ignoredPackages by AppFilterManager.ignoredPackages.collectAsState()
     val discoveredApps by AppFilterManager.discoveredApps.collectAsState()
+    val syncOffsetMs by MediaBridgeStateHolder.syncOffsetMs.collectAsState()
 
     var isNotificationAccessGranted by remember {
         mutableStateOf(NotificationRebindHelper.isNotificationAccessGranted(context))
@@ -303,6 +305,8 @@ fun ClawdBridgeMainApp() {
                         requestCount = requestCount,
                         activeSseClients = activeSseClients,
                         lastRequestTimestamp = lastRequestTimestamp,
+                        syncOffsetMs = syncOffsetMs,
+                        onSyncOffsetChange = { MediaBridgeStateHolder.setSyncOffsetMs(it) },
                         isFilterEnabled = isFilterEnabled,
                         ignoredPackages = ignoredPackages,
                         discoveredApps = discoveredApps,

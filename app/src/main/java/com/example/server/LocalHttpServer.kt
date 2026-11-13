@@ -2,12 +2,12 @@ package com.example.server
 
 import android.util.Log
 import com.example.state.MediaBridgeStateHolder
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeoutOrNull
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.OutputStream
@@ -29,7 +29,6 @@ object LocalHttpServer {
     private const val TAG = "LocalHttpServer"
     const val PORT = 44444
     const val HOST = "127.0.0.1"
-    private const val SSE_KEEPALIVE_MS = 15000L
 
     private val isRunningFlag = AtomicBoolean(false)
     private var serverSocket: ServerSocket? = null
@@ -113,8 +112,12 @@ object LocalHttpServer {
         _isRunning.value = false
     }
 
+    private const val SSE_PLAYING_SYNC_MS = 2000L
+    private const val SSE_KEEPALIVE_MS = 15000L
+
     private fun handleClientConnection(socket: Socket) {
         try {
+            socket.tcpNoDelay = true
             socket.soTimeout = 3000
             val input = BufferedReader(InputStreamReader(socket.getInputStream()))
             val output = socket.getOutputStream()
@@ -198,7 +201,9 @@ object LocalHttpServer {
     private fun handleSseStream(socket: Socket, output: OutputStream) {
         val count = sseClientCounter.incrementAndGet()
         _activeSseClients.value = count
+        val writeLock = Any()
         try {
+            socket.tcpNoDelay = true
             socket.soTimeout = 0
             val header = StringBuilder()
                 .append("HTTP/1.1 200 OK\r\n")
@@ -207,25 +212,50 @@ object LocalHttpServer {
                 .append("Connection: keep-alive\r\n")
                 .append("Access-Control-Allow-Origin: *\r\n")
                 .append("\r\n")
-            output.write(header.toString().toByteArray(Charsets.US_ASCII))
-            output.flush()
+            synchronized(writeLock) {
+                output.write(header.toString().toByteArray(Charsets.US_ASCII))
+                output.flush()
+            }
 
             // Immediately push current live state upon connection
             val initialJson = MediaBridgeStateHolder.getCurrentSnapshot().toJsonString()
-            writeSseEvent(output, "now_playing", initialJson)
+            synchronized(writeLock) {
+                writeSseEvent(output, "now_playing", initialJson)
+            }
 
             runBlocking {
-                while (isRunningFlag.get() && !socket.isClosed) {
-                    val timedOut = withTimeoutOrNull(SSE_KEEPALIVE_MS) {
-                        MediaBridgeStateHolder.stateEvents.collect { eventData ->
-                            if (!isRunningFlag.get() || socket.isClosed) return@collect
+                val collectorJob = launch(kotlinx.coroutines.Dispatchers.IO) {
+                    MediaBridgeStateHolder.stateEvents.collect { eventData ->
+                        if (!isRunningFlag.get() || socket.isClosed) return@collect
+                        synchronized(writeLock) {
                             writeSseEvent(output, "now_playing", eventData.toJsonString())
                         }
                     }
-                    if (timedOut == null && isRunningFlag.get() && !socket.isClosed) {
-                        output.write(": keepalive\n\n".toByteArray(Charsets.UTF_8))
-                        output.flush()
+                }
+                try {
+                    var elapsedIdleMs = 0L
+                    while (isRunningFlag.get() && !socket.isClosed) {
+                        delay(SSE_PLAYING_SYNC_MS)
+                        if (!isRunningFlag.get() || socket.isClosed) break
+                        val snapshot = MediaBridgeStateHolder.getCurrentSnapshot()
+                        if (snapshot.hasMedia && snapshot.isPlaying) {
+                            elapsedIdleMs = 0L
+                            synchronized(writeLock) {
+                                writeSseEvent(output, "now_playing", snapshot.toJsonString())
+                            }
+                        } else {
+                            elapsedIdleMs += SSE_PLAYING_SYNC_MS
+                            if (elapsedIdleMs >= SSE_KEEPALIVE_MS) {
+                                elapsedIdleMs = 0L
+                                synchronized(writeLock) {
+                                    output.write(": keepalive\n\n".toByteArray(Charsets.UTF_8))
+                                    output.flush()
+                                }
+                            }
+                        }
                     }
+                } finally {
+                    collectorJob.cancel()
                 }
             }
         } catch (_: Exception) {

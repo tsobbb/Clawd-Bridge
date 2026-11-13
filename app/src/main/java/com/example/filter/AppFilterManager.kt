@@ -64,6 +64,7 @@ object AppFilterManager {
                 "org.telegram.messenger.web",
                 "com.exteragram.messenger",
                 "com.radolyn.ayugram",
+                "by.aprelteam.gram",
                 "com.aprelgram.messenger",
                 "org.aprelgram.messenger",
                 "app.aprelgram.messenger"

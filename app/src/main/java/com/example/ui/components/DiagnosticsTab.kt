@@ -32,6 +32,7 @@ import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -46,6 +47,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -100,6 +103,8 @@ fun DiagnosticsTab(
     requestCount: Long,
     activeSseClients: Int,
     lastRequestTimestamp: Long,
+    syncOffsetMs: Int,
+    onSyncOffsetChange: (Int) -> Unit,
     isFilterEnabled: Boolean,
     ignoredPackages: Set<String>,
     discoveredApps: List<DiscoveredMediaApp>,
@@ -150,7 +155,13 @@ fun DiagnosticsTab(
             isTestingApi = isTestingApi
         )
 
-        // 2. App Filter Card (Blacklist — disabled & empty by default)
+        // 2. Global Sync Calibration Card
+        SyncOffsetCard(
+            syncOffsetMs = syncOffsetMs,
+            onSyncOffsetChange = onSyncOffsetChange
+        )
+
+        // 3. App Filter Card (Blacklist — disabled & empty by default)
         AppFilterCard(
             isFilterEnabled = isFilterEnabled,
             ignoredPackages = ignoredPackages,
@@ -168,7 +179,7 @@ fun DiagnosticsTab(
             onClearAll = { AppFilterManager.clearAll() }
         )
 
-        // 3. Backup Storage Card (ТЗ 3.4)
+        // 4. Backup Storage Card (ТЗ 3.4)
         BackupStorageCard(
             targetPath = backupTargetPath,
             lastWrittenTime = backupWrittenTime,
@@ -636,6 +647,118 @@ private fun AppFilterCard(
 }
 
 @Composable
+private fun SyncOffsetCard(
+    syncOffsetMs: Int,
+    onSyncOffsetChange: (Int) -> Unit
+) {
+    val formattedOffset = if (syncOffsetMs > 0) "+${syncOffsetMs} мс" else "${syncOffsetMs} мс"
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("sync_offset_card"),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = DarkSurface),
+        border = BorderStroke(
+            1.dp,
+            if (syncOffsetMs != 0) ElectricCyan.copy(alpha = 0.45f) else DarkSurfaceHighlight
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Timer,
+                        contentDescription = null,
+                        tint = if (syncOffsetMs != 0) ElectricCyan else TextSecondary
+                    )
+                    Column {
+                        Text(
+                            text = "Сдвиг синхронизации",
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = TextPrimary
+                            )
+                        )
+                        Text(
+                            text = "Компенсация задержки Bluetooth / плеера",
+                            style = MaterialTheme.typography.bodySmall.copy(color = TextSecondary)
+                        )
+                    }
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = if (syncOffsetMs != 0) ElectricCyan.copy(alpha = 0.16f) else DarkSurfaceHighlight
+                ) {
+                    Text(
+                        text = formattedOffset,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        style = MaterialTheme.typography.labelMedium.copy(
+                            fontFamily = JetBrainsMonoFontFamily,
+                            fontWeight = FontWeight.Bold,
+                            color = if (syncOffsetMs != 0) ElectricCyan else TextPrimary
+                        )
+                    )
+                }
+            }
+
+            Slider(
+                value = syncOffsetMs.toFloat(),
+                onValueChange = { raw ->
+                    val stepped = (Math.round(raw / 50f) * 50).coerceIn(-2000, 2000)
+                    onSyncOffsetChange(stepped)
+                },
+                valueRange = -2000f..2000f,
+                colors = SliderDefaults.colors(
+                    thumbColor = ElectricCyan,
+                    activeTrackColor = ElectricCyan,
+                    inactiveTrackColor = DarkSurfaceHighlight
+                )
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedButton(
+                    onClick = { onSyncOffsetChange((syncOffsetMs - 100).coerceIn(-2000, 2000)) },
+                    modifier = Modifier.height(40.dp),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Text("-100 мс", fontSize = 12.sp, color = TextPrimary)
+                }
+
+                TextButton(
+                    onClick = { onSyncOffsetChange(0) },
+                    enabled = syncOffsetMs != 0
+                ) {
+                    Text("Сброс (0 мс)", fontSize = 12.sp, color = ElectricCyan)
+                }
+
+                OutlinedButton(
+                    onClick = { onSyncOffsetChange((syncOffsetMs + 100).coerceIn(-2000, 2000)) },
+                    modifier = Modifier.height(40.dp),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Text("+100 мс", fontSize = 12.sp, color = TextPrimary)
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun BackupStorageCard(
     targetPath: String,
     lastWrittenTime: Long,
@@ -858,10 +981,10 @@ private suspend fun testSseEndpoint(targetUrl: String): TestApiResult = withCont
         }
         val lines = mutableListOf<String>()
         conn.inputStream.bufferedReader().use { reader ->
-            repeat(6) {
-                val line = reader.readLine() ?: return@repeat
+            while (lines.size < 12) {
+                val line = reader.readLine() ?: break
                 lines.add(line)
-                if (line.isEmpty() && lines.isNotEmpty()) return@repeat
+                if (line.isEmpty() && lines.any { it.isNotBlank() }) break
             }
         }
         TestApiResult(

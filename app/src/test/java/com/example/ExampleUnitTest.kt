@@ -28,6 +28,7 @@ class ExampleUnitTest {
             isPlaying = true,
             positionKnown = true,
             accentColorHex = "#FF6D7A",
+            accentColorsHex = listOf("#FF6D7A", "#FFAF7B", "#8B5CF6"),
             hasArtwork = true,
             timestamp = 1730868200123L
         )
@@ -46,6 +47,7 @@ class ExampleUnitTest {
         assertTrue(jsonString.contains(""""is_playing":true"""))
         assertTrue(jsonString.contains(""""position_known":true"""))
         assertTrue(jsonString.contains(""""accent_color":"#FF6D7A""""))
+        assertTrue(jsonString.contains(""""accent_colors":["#FF6D7A","#FFAF7B","#8B5CF6"]"""))
         assertTrue(jsonString.contains(""""has_artwork":true"""))
         assertTrue(jsonString.contains(""""timestamp":1730868200123"""))
 
@@ -171,5 +173,13 @@ class ExampleUnitTest {
     fun `verify SSE frame formatting matches standard text event stream format`() {
         val frame = LocalHttpServer.formatSseFrame("now_playing", """{"has_media":false}""")
         assertEquals("event: now_playing\ndata: {\"has_media\":false}\n\n", frame)
+    }
+
+    @Test
+    fun `verify MediaBridgeStateHolder applyOffset clamps cleanly within track bounds`() {
+        assertEquals(1500L, com.example.state.MediaBridgeStateHolder.applyOffset(1000L, 5000L, 500))
+        assertEquals(0L, com.example.state.MediaBridgeStateHolder.applyOffset(200L, 5000L, -500))
+        assertEquals(5000L, com.example.state.MediaBridgeStateHolder.applyOffset(4800L, 5000L, 500))
+        assertEquals(0L, com.example.state.MediaBridgeStateHolder.applyOffset(200L, 0L, -500))
     }
 }

@@ -18,13 +18,15 @@ data class NowPlayingData(
     val isPlaying: Boolean = false,
     val positionKnown: Boolean = true,
     val accentColorHex: String = DEFAULT_ACCENT_HEX,
+    val accentColorsHex: List<String> = DEFAULT_ACCENT_COLORS,
     val hasArtwork: Boolean = false,
     val timestamp: Long = System.currentTimeMillis()
 ) {
     /**
      * Formats JSON response adhering strictly to ТЗ v1.2, v1.3 and v2.0 extensions:
      * - When music is playing: full JSON with track info, album, playback_speed,
-     *   accent_color, has_artwork, position_ms, position_sec, position_known, timestamp.
+     *   accent_color, accent_colors (3-stop gradient), has_artwork, position_ms,
+     *   position_sec, position_known, timestamp.
      * - When idle or paused: minimal {"has_media": false, "is_playing": false}
      */
     fun toJsonString(): String {
@@ -34,10 +36,14 @@ data class NowPlayingData(
             val safeTitle = escapeJson(title)
             val safeAlbum = escapeJson(album)
             val safeColor = escapeJson(accentColorHex.ifBlank { DEFAULT_ACCENT_HEX })
+            val palette = resolvedPalette(safeColor)
+            val paletteJson = palette.joinToString(separator = ",", prefix = "[", postfix = "]") {
+                "\"${escapeJson(it)}\""
+            }
             val formattedSec = String.format(Locale.US, "%.2f", positionSec)
             val formattedSpeed = String.format(Locale.US, "%.2f", playbackSpeed)
 
-            """{"has_media":true,"player":"$safePlayer","artist":"$safeArtist","title":"$safeTitle","album":"$safeAlbum","position_ms":$positionMs,"duration_ms":$durationMs,"position_sec":$formattedSec,"playback_speed":$formattedSpeed,"is_playing":true,"position_known":$positionKnown,"accent_color":"$safeColor","has_artwork":$hasArtwork,"timestamp":$timestamp}"""
+            """{"has_media":true,"player":"$safePlayer","artist":"$safeArtist","title":"$safeTitle","album":"$safeAlbum","position_ms":$positionMs,"duration_ms":$durationMs,"position_sec":$formattedSec,"playback_speed":$formattedSpeed,"is_playing":true,"position_known":$positionKnown,"accent_color":"$safeColor","accent_colors":$paletteJson,"has_artwork":$hasArtwork,"timestamp":$timestamp}"""
         } else {
             """{"has_media":false,"is_playing":false}"""
         }
@@ -88,6 +94,10 @@ data class NowPlayingData(
             val safeTitle = escapeJson(title)
             val safeAlbum = escapeJson(album)
             val safeColor = escapeJson(accentColorHex.ifBlank { DEFAULT_ACCENT_HEX })
+            val palette = resolvedPalette(safeColor)
+            val paletteJson = palette.joinToString(separator = ", ", prefix = "[", postfix = "]") {
+                "\"${escapeJson(it)}\""
+            }
             val formattedSec = String.format(Locale.US, "%.2f", positionSec)
             val formattedSpeed = String.format(Locale.US, "%.2f", playbackSpeed)
 
@@ -104,6 +114,7 @@ data class NowPlayingData(
   "is_playing": true,
   "position_known": $positionKnown,
   "accent_color": "$safeColor",
+  "accent_colors": $paletteJson,
   "has_artwork": $hasArtwork,
   "timestamp": $timestamp
 }"""
@@ -113,6 +124,11 @@ data class NowPlayingData(
   "is_playing": false
 }"""
         }
+    }
+
+    private fun resolvedPalette(primaryHex: String): List<String> {
+        val cleaned = accentColorsHex.filter { it.isNotBlank() }
+        return if (cleaned.size >= 2) cleaned.take(3) else listOf(primaryHex, primaryHex, primaryHex)
     }
 
     private fun escapeJson(value: String): String {
@@ -128,6 +144,7 @@ data class NowPlayingData(
 
     companion object {
         const val DEFAULT_ACCENT_HEX = "#00E5FF"
+        val DEFAULT_ACCENT_COLORS = listOf("#00E5FF", "#3B82F6", "#7C3AED")
         val IDLE = NowPlayingData(hasMedia = false, isPlaying = false, positionKnown = true)
     }
 }

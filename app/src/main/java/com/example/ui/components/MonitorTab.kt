@@ -239,17 +239,49 @@ private fun HeroLiveMonitorCard(
     artworkBitmap: Bitmap?,
     isSimulatorActive: Boolean
 ) {
-    val targetAccent = remember(liveState.accentColorHex, liveState.isPlaying) {
-        if (!liveState.isPlaying) NeonEmerald else parseHexColorOrDefault(liveState.accentColorHex, ElectricCyan)
+    val targetPalette = remember(liveState.accentColorHex, liveState.accentColorsHex, liveState.isPlaying) {
+        if (!liveState.isPlaying) {
+            listOf(NeonEmerald, ElectricCyan, NeonEmerald)
+        } else {
+            val primary = parseHexColorOrDefault(liveState.accentColorHex, ElectricCyan)
+            val parsed = liveState.accentColorsHex.map { parseHexColorOrDefault(it, primary) }
+            when {
+                parsed.size >= 3 -> parsed.take(3)
+                parsed.size == 2 -> listOf(parsed[0], parsed[1], parsed[0])
+                else -> listOf(primary, primary, primary)
+            }
+        }
     }
     val accentColor by animateColorAsState(
-        targetValue = targetAccent,
+        targetValue = targetPalette[0],
         animationSpec = tween(durationMillis = 450),
-        label = "artwork_accent_color"
+        label = "artwork_accent_color_1"
+    )
+    val accentColor2 by animateColorAsState(
+        targetValue = targetPalette[1],
+        animationSpec = tween(durationMillis = 450),
+        label = "artwork_accent_color_2"
+    )
+    val accentColor3 by animateColorAsState(
+        targetValue = targetPalette[2],
+        animationSpec = tween(durationMillis = 450),
+        label = "artwork_accent_color_3"
     )
 
     val imageBitmap = remember(artworkBitmap) {
         artworkBitmap?.takeIf { !it.isRecycled }?.asImageBitmap()
+    }
+
+    val cardBorderBrush = if (liveState.isPlaying) {
+        Brush.linearGradient(
+            colors = listOf(
+                accentColor.copy(alpha = 0.72f),
+                accentColor2.copy(alpha = 0.62f),
+                accentColor3.copy(alpha = 0.55f)
+            )
+        )
+    } else {
+        Brush.linearGradient(colors = listOf(DarkSurfaceHighlight, DarkSurfaceHighlight))
     }
 
     Card(
@@ -258,10 +290,7 @@ private fun HeroLiveMonitorCard(
             .testTag("live_monitor_card"),
         shape = RoundedCornerShape(18.dp),
         colors = CardDefaults.cardColors(containerColor = DarkSurface),
-        border = BorderStroke(
-            1.dp,
-            if (liveState.isPlaying) accentColor.copy(alpha = 0.55f) else DarkSurfaceHighlight
-        )
+        border = BorderStroke(1.2.dp, cardBorderBrush)
     ) {
         Box(
             modifier = Modifier
@@ -269,7 +298,8 @@ private fun HeroLiveMonitorCard(
                 .background(
                     Brush.verticalGradient(
                         colors = listOf(
-                            if (liveState.isPlaying) accentColor.copy(alpha = 0.14f) else Color.Transparent,
+                            if (liveState.isPlaying) accentColor.copy(alpha = 0.16f) else Color.Transparent,
+                            if (liveState.isPlaying) accentColor2.copy(alpha = 0.08f) else Color.Transparent,
                             Color.Transparent
                         )
                     )
@@ -304,7 +334,23 @@ private fun HeroLiveMonitorCard(
                         )
                     }
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        if (liveState.isPlaying && liveState.hasArtwork) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                                listOf(accentColor, accentColor2, accentColor3).forEach { dotColor ->
+                                    Box(
+                                        modifier = Modifier
+                                            .size(7.dp)
+                                            .clip(CircleShape)
+                                            .background(dotColor)
+                                    )
+                                }
+                            }
+                        }
+
                         if (liveState.isPlaying && liveState.playbackSpeed != 1.0f) {
                             Surface(
                                 shape = RoundedCornerShape(6.dp),
@@ -352,7 +398,10 @@ private fun HeroLiveMonitorCard(
                         Surface(
                             shape = RoundedCornerShape(14.dp),
                             color = DarkSurfaceVariant,
-                            border = BorderStroke(1.dp, accentColor.copy(alpha = 0.5f)),
+                            border = BorderStroke(
+                                1.5.dp,
+                                Brush.linearGradient(listOf(accentColor, accentColor2, accentColor3))
+                            ),
                             modifier = Modifier.size(84.dp)
                         ) {
                             if (imageBitmap != null) {
