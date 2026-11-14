@@ -3,12 +3,13 @@ package com.example.lyrics
 import com.example.media.ArtworkCatalogResolver
 import com.example.media.ArtworkExtractor
 import com.example.media.TrackQuerySpec
+import com.example.network.BridgeHttpClient
 import org.json.JSONArray
 import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
 import java.net.URLEncoder
 import java.util.Locale
+import java.util.concurrent.Callable
+import java.util.concurrent.Executors
 
 data class LyricsLine(
     val timeMs: Long,
@@ -61,47 +62,77 @@ object LyricsCatalogResolver {
         }
     }
 
-    fun resolveLyrics(rawArtist: String, rawTitle: String): LyricsResult {
+    fun resolveLyrics(
+        rawArtist: String,
+        rawTitle: String,
+        forceRefresh: Boolean = false,
+        preferredProvider: String? = null
+    ): LyricsResult {
         val spec = ArtworkCatalogResolver.buildTrackQuerySpec(rawArtist, rawTitle)
         if (spec.title.isBlank() && spec.artist.isBlank()) {
             return emptyNotFound(rawArtist, rawTitle)
         }
 
-        val cacheKey = "${spec.artist.lowercase(Locale.US)}|${spec.title.lowercase(Locale.US)}"
-        synchronized(cacheLock) {
-            lyricsCache[cacheKey]?.let { return it }
+        val providerKey = preferredProvider?.lowercase(Locale.US)?.takeIf { it.isNotBlank() && it != "auto" }
+        val cacheKey = "${spec.artist.lowercase(Locale.US)}|${spec.title.lowercase(Locale.US)}|${providerKey ?: "auto"}"
+        if (!forceRefresh) {
+            synchronized(cacheLock) {
+                lyricsCache[cacheKey]?.let { return it }
+            }
         }
 
-        // Priority 1: LRCLIB (best synced LRC source)
+        if (providerKey != null) {
+            val picked = when (providerKey) {
+                "lrclib" -> queryLrcLib(spec)
+                "netease" -> queryNetEase(spec)
+                "genius" -> queryGeniusLyrics(spec)
+                "lyrics_ovh" -> queryLyricsOvh(spec)
+                else -> null
+            }
+            val result = if (picked != null && picked.found) picked else emptyNotFound(spec.artist, spec.title)
+            if (result.found) cacheResult(cacheKey, result)
+            return result
+        }
+
+        // Priority 1: Fast LRCLIB (cleanest synced LRC source; queried immediately with 8/10/15s catalog client)
         queryLrcLib(spec)?.let { result ->
-            if (result.found) {
+            if (result.found && result.synced) {
                 cacheResult(cacheKey, result)
                 return result
+            }
+            // If LRCLIB found plain lyrics only, check NetEase quickly in parallel for synced LRC, else keep LRCLIB plain
+            if (result.found) {
+                val netEaseSynced = queryNetEase(spec)?.takeIf { it.found && it.synced }
+                val best = netEaseSynced ?: result
+                cacheResult(cacheKey, best)
+                return best
             }
         }
 
-        // Priority 2: NetEase Cloud Music (wide synced LRC catalog)
-        queryNetEase(spec)?.let { result ->
-            if (result.found) {
-                cacheResult(cacheKey, result)
-                return result
-            }
-        }
+        // Priority 2: Query NetEase, Genius, and Lyrics.ovh in parallel so slow providers don't block faster ones
+        val pool = Executors.newFixedThreadPool(3)
+        try {
+            val fNetEase = pool.submit(Callable { queryNetEase(spec) })
+            val fGenius = pool.submit(Callable { queryGeniusLyrics(spec) })
+            val fOvh = pool.submit(Callable { queryLyricsOvh(spec) })
 
-        // Priority 3: Genius (top catalog for SoundCloud / CIS / underground plain lyrics)
-        queryGeniusLyrics(spec)?.let { result ->
-            if (result.found) {
-                cacheResult(cacheKey, result)
-                return result
+            val netEaseRes = runCatching { fNetEase.get() }.getOrNull()
+            if (netEaseRes?.found == true) {
+                cacheResult(cacheKey, netEaseRes)
+                return netEaseRes
             }
-        }
-
-        // Priority 4: Lyrics.ovh
-        queryLyricsOvh(spec)?.let { result ->
-            if (result.found) {
-                cacheResult(cacheKey, result)
-                return result
+            val geniusRes = runCatching { fGenius.get() }.getOrNull()
+            if (geniusRes?.found == true) {
+                cacheResult(cacheKey, geniusRes)
+                return geniusRes
             }
+            val ovhRes = runCatching { fOvh.get() }.getOrNull()
+            if (ovhRes?.found == true) {
+                cacheResult(cacheKey, ovhRes)
+                return ovhRes
+            }
+        } finally {
+            pool.shutdownNow()
         }
 
         val notFound = emptyNotFound(spec.artist, spec.title)
@@ -177,18 +208,18 @@ object LyricsCatalogResolver {
 
     private fun queryNetEase(spec: TrackQuerySpec): LyricsResult? {
         for (q in spec.searchQueries.take(2)) {
-            var conn: HttpURLConnection? = null
             try {
                 val encoded = URLEncoder.encode(q, "UTF-8")
-                conn = (URL("https://music.163.com/api/search/get/web?s=$encoded&type=1&offset=0&total=true&limit=4").openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 3500
-                    readTimeout = 3500
-                    requestMethod = "GET"
-                    setRequestProperty("User-Agent", ArtworkExtractor.BROWSER_USER_AGENT)
-                    setRequestProperty("Referer", "https://music.163.com/")
-                }
-                if (conn.responseCode !in 200..299) continue
-                val body = conn.inputStream?.bufferedReader()?.use { it.readText() } ?: continue
+                val (code, body) = BridgeHttpClient.getTextWithCode(
+                    url = "https://music.163.com/api/search/get/web?s=$encoded&type=1&offset=0&total=true&limit=4",
+                    useCatalogClient = true,
+                    headers = mapOf(
+                        "User-Agent" to BridgeHttpClient.BROWSER_USER_AGENT,
+                        "Referer" to "https://music.163.com/"
+                    ),
+                    maxRetries = 1
+                )
+                if (code !in 200..299 || body == null) continue
                 val songs = JSONObject(body).optJSONObject("result")?.optJSONArray("songs") ?: continue
                 for (i in 0 until songs.length()) {
                     val song = songs.optJSONObject(i) ?: continue
@@ -202,7 +233,15 @@ object LyricsCatalogResolver {
                     if (!ArtworkCatalogResolver.isReasonableMatch(spec, songArtist, songTitle)) continue
 
                     val lyricUrl = "https://music.163.com/api/song/lyric?id=$songId&lv=1&tv=-1"
-                    val (lrcBytes, _) = ArtworkExtractor.downloadHttpBytes(lyricUrl, timeoutMs = 3500)
+                    val (lrcBytes, _) = BridgeHttpClient.getBytes(
+                        url = lyricUrl,
+                        useCatalogClient = true,
+                        headers = mapOf(
+                            "User-Agent" to BridgeHttpClient.BROWSER_USER_AGENT,
+                            "Referer" to "https://music.163.com/"
+                        ),
+                        maxRetries = 1
+                    )
                     if (lrcBytes == null) continue
                     val lyricJson = JSONObject(String(lrcBytes, Charsets.UTF_8))
                     val rawLrc = lyricJson.optJSONObject("lrc")?.optString("lyric") ?: ""
@@ -222,8 +261,6 @@ object LyricsCatalogResolver {
                     )
                 }
             } catch (_: Throwable) {
-            } finally {
-                conn?.disconnect()
             }
         }
         return null

@@ -25,6 +25,7 @@ object AppMetadataResolver {
 
     private val iconCache = ConcurrentHashMap<String, ImageBitmap>()
     private val labelCache = ConcurrentHashMap<String, String>()
+    private val resolvedCache = ConcurrentHashMap<String, ResolvedAppInfo>()
 
     private val knownFriendlyNames = mapOf(
         "com.soundcloud.android" to "SoundCloud",
@@ -87,15 +88,32 @@ object AppMetadataResolver {
         }
     }
 
+    fun prewarm(context: Context, packages: Collection<String>) {
+        val appCtx = context.applicationContext
+        for (pkg in packages) {
+            if (pkg.isNotBlank() && !resolvedCache.containsKey(pkg)) {
+                resolveApp(appCtx, pkg)
+            }
+        }
+    }
+
     fun resolveApp(context: Context?, packageName: String, fallbackLabel: String? = null): ResolvedAppInfo {
-        val friendly = knownFriendlyNames[packageName]
-            ?: fallbackLabel?.takeIf { it.isNotBlank() && it != packageName }
-            ?: resolveFriendlyName(context, packageName)
-        return ResolvedAppInfo(
-            packageName = packageName,
+        val cleaned = packageName.trim()
+        resolvedCache[cleaned]?.let { cached ->
+            if (cached.icon != null || context == null) return cached
+        }
+        val friendly = knownFriendlyNames[cleaned]
+            ?: fallbackLabel?.takeIf { it.isNotBlank() && it != cleaned }
+            ?: resolveFriendlyName(context, cleaned)
+        val info = ResolvedAppInfo(
+            packageName = cleaned,
             displayName = friendly,
-            icon = resolveAppIcon(context, packageName)
+            icon = resolveAppIcon(context, cleaned)
         )
+        if (cleaned.isNotEmpty() && (info.icon != null || context == null)) {
+            resolvedCache[cleaned] = info
+        }
+        return info
     }
 
     private fun queryPmLabel(context: Context, packageName: String): String? {

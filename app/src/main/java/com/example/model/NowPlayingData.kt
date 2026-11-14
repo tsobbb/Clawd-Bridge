@@ -19,6 +19,8 @@ data class NowPlayingData(
     val positionKnown: Boolean = true,
     val accentColorHex: String = DEFAULT_ACCENT_HEX,
     val accentColorsHex: List<String> = DEFAULT_ACCENT_COLORS,
+    val extendedColorsHex: List<String> = emptyList(),
+    val gridColorsHex: List<String> = emptyList(),
     val hasArtwork: Boolean = false,
     val timestamp: Long = System.currentTimeMillis()
 ) {

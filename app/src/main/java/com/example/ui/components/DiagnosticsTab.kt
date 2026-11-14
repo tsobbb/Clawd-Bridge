@@ -84,6 +84,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.filter.AppFilterManager
 import com.example.filter.DiscoveredMediaApp
+import com.example.state.BackgroundStyle
 import com.example.ui.theme.CardSurfaceDense
 import com.example.ui.theme.HairlineDivider
 import com.example.ui.theme.JetBrainsMonoFontFamily
@@ -158,6 +159,9 @@ fun DiagnosticsTab(
     isBatteryOptIgnored: Boolean,
     dynamicBackgroundEnabled: Boolean,
     onToggleDynamicBackground: (Boolean) -> Unit,
+    backgroundStyle: BackgroundStyle,
+    onBackgroundStyleChange: (BackgroundStyle) -> Unit,
+    onSliderDragChange: (Boolean) -> Unit = {},
     onForceRebind: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -209,7 +213,8 @@ fun DiagnosticsTab(
 
         SyncOffsetCard(
             syncOffsetMs = syncOffsetMs,
-            onSyncOffsetChange = onSyncOffsetChange
+            onSyncOffsetChange = onSyncOffsetChange,
+            onSliderDragChange = onSliderDragChange
         )
 
         AppFilterCard(
@@ -240,6 +245,8 @@ fun DiagnosticsTab(
             isBatteryOptIgnored = isBatteryOptIgnored,
             dynamicBackgroundEnabled = dynamicBackgroundEnabled,
             onToggleDynamicBackground = onToggleDynamicBackground,
+            backgroundStyle = backgroundStyle,
+            onBackgroundStyleChange = onBackgroundStyleChange,
             onForceRebind = onForceRebind
         )
     }
@@ -346,8 +353,18 @@ private fun HttpServerDiagnosticsCard(
         }
     }
 
-    val previewBmp = remember(artworkBitmap) {
-        artworkBitmap?.takeIf { !it.isRecycled }?.asImageBitmap()
+    val validBmp = remember(artworkBitmap) {
+        artworkBitmap?.takeIf { !it.isRecycled }
+    }
+    val previewBmp = remember(validBmp) {
+        validBmp?.asImageBitmap()
+    }
+    val effectiveArtworkStatus = remember(validBmp, artworkDebugStatus) {
+        if (validBmp != null && (artworkDebugStatus.isBlank() || artworkDebugStatus == "Ожидание трека")) {
+            "Готова • ${validBmp.width}×${validBmp.height}"
+        } else {
+            artworkDebugStatus
+        }
     }
 
     FrostedGlassCard(
@@ -514,7 +531,7 @@ private fun HttpServerDiagnosticsCard(
                     }
 
                     Text(
-                        text = "Обложка: $artworkDebugStatus",
+                        text = "Обложка: $effectiveArtworkStatus",
                         style = MaterialTheme.typography.bodySmall.copy(
                             fontFamily = JetBrainsMonoFontFamily,
                             color = TextSecondary
@@ -606,7 +623,8 @@ private fun HttpServerDiagnosticsCard(
 @Composable
 private fun SyncOffsetCard(
     syncOffsetMs: Int,
-    onSyncOffsetChange: (Int) -> Unit
+    onSyncOffsetChange: (Int) -> Unit,
+    onSliderDragChange: (Boolean) -> Unit
 ) {
     val haptic = LocalHapticFeedback.current
     val formattedOffset = if (syncOffsetMs > 0) "+${syncOffsetMs} мс" else "${syncOffsetMs} мс"
@@ -677,6 +695,7 @@ private fun SyncOffsetCard(
                     }
                     onSyncOffsetChange(next)
                 },
+                onDragActiveChange = onSliderDragChange,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(36.dp)
@@ -733,6 +752,7 @@ private fun SyncOffsetCard(
 private fun CenteredSyncSlider(
     valueMs: Int,
     onValueChange: (Int) -> Unit,
+    onDragActiveChange: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var widthPx by remember { mutableIntStateOf(1) }
@@ -752,7 +772,11 @@ private fun CenteredSyncSlider(
                 }
             }
             .pointerInput(Unit) {
-                detectHorizontalDragGestures { change, _ ->
+                detectHorizontalDragGestures(
+                    onDragStart = { onDragActiveChange(true) },
+                    onDragEnd = { onDragActiveChange(false) },
+                    onDragCancel = { onDragActiveChange(false) }
+                ) { change, _ ->
                     change.consume()
                     widthPx = size.width
                     onValueChange(offsetXToStep(change.position.x))

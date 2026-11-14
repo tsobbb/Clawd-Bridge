@@ -9,6 +9,7 @@ import android.os.Build
 import android.provider.Settings
 import android.util.Log
 import com.example.BuildConfig
+import com.example.network.BridgeHttpClient
 import com.example.plugin.PluginDownloader
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -23,9 +24,6 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileInputStream
-import java.io.FileOutputStream
-import java.net.HttpURLConnection
-import java.net.URL
 import java.security.MessageDigest
 import java.util.Locale
 
@@ -528,57 +526,29 @@ object BridgeAppUpdater {
         val partFile = File(dir, "$safeName.part")
         val targetFile = File(dir, safeName)
 
-        val conn = (URL(release.downloadUrl).openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 15000
-            readTimeout = 30000
-            instanceFollowRedirects = true
-            setRequestProperty("User-Agent", "ClawdBridge-Updater/${BuildConfig.VERSION_NAME}")
-            if (token.isNotBlank()) {
-                setRequestProperty("Authorization", "Bearer ${token.trim()}")
-            }
+        val headers = buildMap {
+            put("User-Agent", "${BridgeHttpClient.GITHUB_USER_AGENT}/${BuildConfig.VERSION_NAME}")
+            if (token.isNotBlank()) put("Authorization", "Bearer ${token.trim()}")
+        }
+        BridgeHttpClient.downloadFile(
+            url = release.downloadUrl,
+            partFile = partFile,
+            expectedSizeBytes = release.sizeBytes,
+            headers = headers,
+            maxRetries = 2
+        ) { downloaded, totalBytes ->
+            val progress = if (totalBytes > 0L) {
+                (downloaded.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f)
+            } else null
+            onProgress(progress, downloaded, totalBytes)
         }
 
-        return try {
-            val code = conn.responseCode
-            if (code !in 200..299) {
-                throw IllegalStateException("Ошибка скачивания APK (HTTP $code)")
-            }
-
-            val totalBytes = conn.contentLengthLong.takeIf { it > 0L } ?: release.sizeBytes
-            var downloaded = 0L
-
-            conn.inputStream.use { input ->
-                FileOutputStream(partFile, false).use { out ->
-                    val buf = ByteArray(16 * 1024)
-                    while (true) {
-                        val read = input.read(buf)
-                        if (read == -1) break
-                        out.write(buf, 0, read)
-                        downloaded += read
-                        val progress = if (totalBytes > 0L) {
-                            (downloaded.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f)
-                        } else null
-                        onProgress(progress, downloaded, totalBytes)
-                    }
-                    out.flush()
-                }
-            }
-
-            if (downloaded <= 0L) {
-                partFile.delete()
-                throw IllegalStateException("Скачанный APK пуст")
-            }
-
-            if (targetFile.exists()) targetFile.delete()
-            if (!partFile.renameTo(targetFile)) {
-                partFile.copyTo(targetFile, overwrite = true)
-                partFile.delete()
-            }
-            targetFile
-        } finally {
-            conn.disconnect()
+        if (targetFile.exists()) targetFile.delete()
+        if (!partFile.renameTo(targetFile)) {
+            partFile.copyTo(targetFile, overwrite = true)
+            partFile.delete()
         }
+        return targetFile
     }
 
     private fun httpGetText(
@@ -587,33 +557,24 @@ object BridgeAppUpdater {
         acceptJson: Boolean,
         noCache: Boolean
     ): String? {
-        val conn = (URL(targetUrl).openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 10000
-            readTimeout = 12000
-            instanceFollowRedirects = true
-            useCaches = !noCache
-            setRequestProperty("User-Agent", "ClawdBridge-Updater/${BuildConfig.VERSION_NAME}")
-            if (acceptJson) {
-                setRequestProperty("Accept", "application/vnd.github+json")
-            }
+        val headers = buildMap {
+            put("User-Agent", "${BridgeHttpClient.GITHUB_USER_AGENT}/${BuildConfig.VERSION_NAME}")
+            if (acceptJson) put("Accept", "application/vnd.github+json")
             if (noCache) {
-                setRequestProperty("Cache-Control", "no-cache, no-store, must-revalidate")
-                setRequestProperty("Pragma", "no-cache")
+                put("Cache-Control", "no-cache, no-store, must-revalidate")
+                put("Pragma", "no-cache")
             }
-            if (token.isNotBlank()) {
-                setRequestProperty("Authorization", "Bearer ${token.trim()}")
-            }
+            if (token.isNotBlank()) put("Authorization", "Bearer ${token.trim()}")
         }
-        return try {
-            val code = conn.responseCode
-            if (code !in 200..299) null
-            else conn.inputStream.bufferedReader().use { it.readText() }
-        } catch (_: Exception) {
-            null
-        } finally {
-            conn.disconnect()
-        }
+        return runCatching {
+            val (code, text) = BridgeHttpClient.getTextWithCode(
+                url = targetUrl,
+                useCatalogClient = false,
+                headers = headers,
+                maxRetries = 2
+            )
+            if (code in 200..299) text else null
+        }.getOrNull()
     }
 
     internal data class ParsedRemoteVersion(

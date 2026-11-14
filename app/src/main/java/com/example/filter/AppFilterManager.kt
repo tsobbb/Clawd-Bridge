@@ -3,9 +3,12 @@ package com.example.filter
 import android.content.Context
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 
 data class AppFilterPreset(
     val id: String,
@@ -111,6 +114,11 @@ object AppFilterManager {
             )
         }.sortedBy { it.appLabel.lowercase() }
         _discoveredApps.value = list
+        if (ctx != null && packages.isNotEmpty()) {
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                com.example.util.AppMetadataResolver.prewarm(ctx, packages)
+            }
+        }
     }
 
     private fun resolveAppLabel(context: Context?, packageName: String): String {

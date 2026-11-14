@@ -24,10 +24,13 @@ object SmartColorExtractor {
         val isMonochrome: Boolean,
         val playerAccentRgb: Int,
         val paletteTriadRgb: List<Int>,
-        val radialAnchorRgbs: List<Int>
+        val radialAnchorRgbs: List<Int>,
+        val paletteExtendedRgb: List<Int> = paletteTriadRgb,
+        val spatialGrid3x3Rgb: List<Int> = List(9) { 0x18181B }
     )
 
     val MONOCHROME_DOTS_RGB = listOf(0x52525B, 0xA1A1AA, 0xF4F4F5)
+    val MONOCHROME_EXTENDED_RGB = listOf(0x1E2026, 0x3B404B, 0x5A6170, 0x868E9E, 0xBCC2CE, 0xE5E8EE)
     const val MONOCHROME_ACCENT_RGB = 0xF4F4F5
 
     fun rgbToHsl(rgb: Int): Hsl {
@@ -99,6 +102,20 @@ object SmartColorExtractor {
         val qB = LongArray(4)
         val qCount = IntArray(4)
 
+        // 3x3 Spatial Zone accumulators (9 zones)
+        val gR = LongArray(9)
+        val gG = LongArray(9)
+        val gB = LongArray(9)
+        val gCount = IntArray(9)
+
+        // Track highest-chroma highlight cluster across all pixels so tiny contrasting details (e.g. cyan on red/black) survive
+        var peakChromaScore = 0f
+        var peakChromaRgb = -1
+        var warmestDarkL = 1f
+        var shadowToneRgb = 0x12141A
+        var peakLightL = 0f
+        var highlightToneRgb = 0xD6DAE2
+
         var totalOpaque = 0
         var colorfulCount = 0
         var darkPixelCount = 0
@@ -125,6 +142,14 @@ object SmartColorExtractor {
             qB[qIdx] += b
             qCount[qIdx]++
 
+            val gx = ((x * 3) / width).coerceIn(0, 2)
+            val gy = ((y * 3) / height).coerceIn(0, 2)
+            val gIdx = gy * 3 + gx
+            gR[gIdx] += r
+            gG[gIdx] += g
+            gB[gIdx] += b
+            gCount[gIdx]++
+
             totalOpaque++
             val maxC = max(r / 255f, max(g / 255f, b / 255f))
             val minC = min(r / 255f, min(g / 255f, b / 255f))
@@ -133,10 +158,24 @@ object SmartColorExtractor {
             if (hsl.l < 0.24f) darkPixelCount++
             if (hsl.l > 0.72f) lightPixelCount++
 
+            if (hsl.l in 0.08f..0.28f && hsl.l < warmestDarkL) {
+                warmestDarkL = hsl.l
+                shadowToneRgb = rgb
+            }
+            if (hsl.l in 0.55f..0.90f && chroma > 0.08f && hsl.l > peakLightL) {
+                peakLightL = hsl.l
+                highlightToneRgb = rgb
+            }
+
             // Ignore near-white / pale cream background paper (high lightness, low chroma) so it doesn't turn brown
             val isRealColorful = chroma > 0.14f && hsl.s > 0.18f && hsl.l in 0.08f..0.88f
             if (isRealColorful) {
                 colorfulCount++
+                val chromaScore = chroma * hsl.s * (1.0f - abs(hsl.l - 0.52f) * 0.5f)
+                if (chromaScore > peakChromaScore) {
+                    peakChromaScore = chromaScore
+                    peakChromaRgb = rgb
+                }
                 val bin = ((hsl.h / (360f / binCount)).toInt()).coerceIn(0, binCount - 1)
                 val weight = (hsl.s * hsl.s * 3.5f + chroma * 1.8f + 0.15f) * (1.0f - abs(hsl.l - 0.50f) * 0.40f)
                 val rad = hsl.h * (PI.toFloat() / 180f)
@@ -160,12 +199,25 @@ object SmartColorExtractor {
             }
         }
 
+        val spatialGrid = (0 until 9).map { g ->
+            if (gCount[g] > 0) {
+                val r = (gR[g] / gCount[g]).toInt().coerceIn(0, 255)
+                val green = (gG[g] / gCount[g]).toInt().coerceIn(0, 255)
+                val b = (gB[g] / gCount[g]).toInt().coerceIn(0, 255)
+                (r shl 16) or (green shl 8) or b
+            } else {
+                0x14161D
+            }
+        }
+
         if (totalOpaque == 0) {
             return SmartPaletteResult(
                 isMonochrome = true,
                 playerAccentRgb = MONOCHROME_ACCENT_RGB,
                 paletteTriadRgb = MONOCHROME_DOTS_RGB,
-                radialAnchorRgbs = anchors
+                radialAnchorRgbs = anchors,
+                paletteExtendedRgb = MONOCHROME_EXTENDED_RGB,
+                spatialGrid3x3Rgb = spatialGrid
             )
         }
 
@@ -176,11 +228,17 @@ object SmartColorExtractor {
 
         // Monochrome / B&W / white-paper cover (< 4.5% genuinely colorful pixels) -> pure graphite/silver/lunar white
         if (colorfulRatio < 0.045f || rankedBins.isEmpty()) {
+            val monoGrid = spatialGrid.map { cell ->
+                val l = rgbToHsl(cell).l.coerceIn(0.08f, 0.72f)
+                hslToRgb(218f, 0.05f, l)
+            }
             return SmartPaletteResult(
                 isMonochrome = true,
                 playerAccentRgb = MONOCHROME_ACCENT_RGB,
                 paletteTriadRgb = MONOCHROME_DOTS_RGB,
-                radialAnchorRgbs = anchors
+                radialAnchorRgbs = anchors,
+                paletteExtendedRgb = MONOCHROME_EXTENDED_RGB,
+                spatialGrid3x3Rgb = monoGrid
             )
         }
 
@@ -260,11 +318,55 @@ object SmartColorExtractor {
             }
         }
 
+        // Extended 6-color palette (dominant, secondary, vibrant accent including rare high-chroma spots, shadow, highlight, companion)
+        val extendedClusters = mutableListOf(topBin)
+        for (candidate in rankedBins.drop(1)) {
+            if (binWeight[candidate] >= topWeight * 0.03f &&
+                extendedClusters.all { hueBinDistance(it, candidate) >= 2 }
+            ) {
+                extendedClusters.add(candidate)
+                if (extendedClusters.size == 4) break
+            }
+        }
+
+        val extended = linkedSetOf<Int>()
+        extended.add(
+            hslToRgb(topHue, topSat.coerceIn(0.52f, 0.88f), clusterLight(topBin).coerceIn(0.36f, 0.58f))
+        )
+        for (bin in extendedClusters.drop(1)) {
+            extended.add(
+                hslToRgb(clusterHue(bin), clusterSat(bin).coerceIn(0.45f, 0.88f), clusterLight(bin).coerceIn(0.34f, 0.64f))
+            )
+        }
+        if (peakChromaRgb != -1) {
+            val peakHsl = rgbToHsl(peakChromaRgb)
+            extended.add(hslToRgb(peakHsl.h, peakHsl.s.coerceIn(0.58f, 0.92f), peakHsl.l.coerceIn(0.42f, 0.65f)))
+        }
+        val shadowHsl = rgbToHsl(shadowToneRgb)
+        extended.add(
+            if (shadowHsl.s < 0.14f) hslToRgb(topHue, (topSat * 0.45f).coerceAtMost(0.45f), 0.18f)
+            else hslToRgb(shadowHsl.h, shadowHsl.s.coerceIn(0.35f, 0.72f), 0.20f)
+        )
+        val hlHsl = rgbToHsl(highlightToneRgb)
+        extended.add(
+            if (hlHsl.s < 0.15f) 0xD6DAE2
+            else hslToRgb(hlHsl.h, hlHsl.s.coerceIn(0.40f, 0.82f), 0.68f)
+        )
+
+        val extendedList = extended.toMutableList()
+        var hueStep = 28f
+        while (extendedList.size < 6) {
+            extendedList.add(hslToRgb((topHue + hueStep) % 360f, topSat.coerceIn(0.42f, 0.78f), 0.36f))
+            hueStep += 42f
+        }
+
         return SmartPaletteResult(
             isMonochrome = false,
             playerAccentRgb = playerAccentRgb,
             paletteTriadRgb = dots,
-            radialAnchorRgbs = anchors
+            radialAnchorRgbs = anchors,
+            paletteExtendedRgb = extendedList.take(6),
+            spatialGrid3x3Rgb = spatialGrid
         )
     }
 }
@@ -304,6 +406,26 @@ object ArtworkBlurHelper {
 
         scaled.setPixels(pixels, 0, size, 0, 0, size, size)
         return scaled
+    }
+
+    /**
+     * Produces a lightweight ARGB_8888 bitmap (default 144x144) safe for GPU Modifier.blur()
+     * so Android 13 renders Apple Music ambient layers at full 60/120 FPS without sampling huge bitmaps.
+     */
+    fun createDownscaledBlurSource(source: Bitmap, targetSize: Int = 144): Bitmap {
+        val sw = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O &&
+            source.config == Bitmap.Config.HARDWARE
+        ) {
+            source.copy(Bitmap.Config.ARGB_8888, false)
+        } else {
+            source
+        }
+        val out = Bitmap.createBitmap(targetSize, targetSize, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(out)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        canvas.drawBitmap(sw, Rect(0, 0, sw.width, sw.height), Rect(0, 0, targetSize, targetSize), paint)
+        if (sw !== source && !sw.isRecycled) sw.recycle()
+        return out
     }
 
     fun extractPixels32(source: Bitmap): IntArray {

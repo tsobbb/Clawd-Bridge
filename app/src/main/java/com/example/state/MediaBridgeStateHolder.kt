@@ -7,6 +7,8 @@ import android.media.MediaMetadata
 import android.media.session.MediaController
 import android.media.session.PlaybackState
 import android.os.SystemClock
+import com.example.lyrics.LyricsCatalogResolver
+import com.example.lyrics.LyricsResult
 import com.example.media.ArtworkCatalogResolver
 import com.example.media.ArtworkExtractor
 import com.example.media.ExtractedArtwork
@@ -15,6 +17,7 @@ import com.example.simulator.TestMediaSimulator
 import com.example.storage.BackupFileWriter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -29,9 +32,76 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
+enum class BackgroundStyle(val id: String, val label: String) {
+    LIQUID_SILK("liquid_silk", "Жидкий шёлк"),
+    APPLE_MUSIC("apple_music", "Apple Music"),
+    MESH_GRID_3X3("mesh_grid_3x3", "Сетка 3×3"),
+    AURORA("aurora", "Аврора"),
+    PURE_BLACK("pure_black", "Чистый чёрный");
+
+    companion object {
+        fun fromId(id: String?): BackgroundStyle {
+            return entries.firstOrNull { it.id == id } ?: LIQUID_SILK
+        }
+    }
+}
+
+enum class PlayerCoverStyle(val id: String, val label: String) {
+    CARD("card", "Card"),
+    WIDE("wide", "Wide");
+
+    companion object {
+        fun fromId(id: String?): PlayerCoverStyle = entries.firstOrNull { it.id == id } ?: CARD
+    }
+}
+
+enum class PlayerTitleAlignment(val id: String, val label: String) {
+    LEFT("left", "Слева"),
+    CENTERED("centered", "По центру");
+
+    companion object {
+        fun fromId(id: String?): PlayerTitleAlignment = entries.firstOrNull { it.id == id } ?: LEFT
+    }
+}
+
+enum class PlayerBackgroundMode(val id: String, val label: String) {
+    GRADIENT("gradient", "Градиент"),
+    BLUR("blur", "Размытие"),
+    SOLID("solid", "Сплошной");
+
+    companion object {
+        fun fromId(id: String?): PlayerBackgroundMode = entries.firstOrNull { it.id == id } ?: GRADIENT
+    }
+}
+
+enum class PlayerAccentSource(val id: String, val label: String) {
+    COVER("cover", "Из обложки"),
+    THEME("theme", "Из темы");
+
+    companion object {
+        fun fromId(id: String?): PlayerAccentSource = entries.firstOrNull { it.id == id } ?: COVER
+    }
+}
+
+data class PlayerStyleConfig(
+    val coverStyle: PlayerCoverStyle = PlayerCoverStyle.CARD,
+    val titleAlignment: PlayerTitleAlignment = PlayerTitleAlignment.LEFT,
+    val swipeCoverToSkip: Boolean = true,
+    val wavySeekbarEnabled: Boolean = true,
+    val backgroundMode: PlayerBackgroundMode = PlayerBackgroundMode.GRADIENT,
+    val accentSource: PlayerAccentSource = PlayerAccentSource.COVER
+)
+
+sealed class PlayerLyricsUiState {
+    data object Idle : PlayerLyricsUiState()
+    data class Loading(val trackKey: String) : PlayerLyricsUiState()
+    data class Loaded(val trackKey: String, val result: LyricsResult) : PlayerLyricsUiState()
+    data class Error(val trackKey: String, val message: String) : PlayerLyricsUiState()
+}
+
 /**
  * Thread-safe centralized state manager for media sessions, multi-source album artwork,
- * procedural fallback palettes, real-time playback extrapolation, and SSE broadcasting.
+ * extended palettes, playback transport controls, lyrics resolution, and SSE broadcasting.
  */
 object MediaBridgeStateHolder {
 
@@ -57,11 +127,28 @@ object MediaBridgeStateHolder {
     private val _liveState = MutableStateFlow(NowPlayingData.IDLE)
     val liveState: StateFlow<NowPlayingData> = _liveState.asStateFlow()
 
+    /**
+     * Retained media track state for in-app Fullscreen Player (remains populated while paused
+     * so pressing Pause does not close or blank out the built-in player).
+     */
+    private val _playerUiState = MutableStateFlow(NowPlayingData.IDLE)
+    val playerUiState: StateFlow<NowPlayingData> = _playerUiState.asStateFlow()
+
     private val _artworkBitmap = MutableStateFlow<Bitmap?>(null)
     val artworkBitmap: StateFlow<Bitmap?> = _artworkBitmap.asStateFlow()
 
     private val _artworkDebugStatus = MutableStateFlow("Ожидание трека")
     val artworkDebugStatus: StateFlow<String> = _artworkDebugStatus.asStateFlow()
+
+    private val _lyricsUiState = MutableStateFlow<PlayerLyricsUiState>(PlayerLyricsUiState.Idle)
+    val lyricsUiState: StateFlow<PlayerLyricsUiState> = _lyricsUiState.asStateFlow()
+
+    private val _preferredLyricsProvider = MutableStateFlow("auto")
+    val preferredLyricsProvider: StateFlow<String> = _preferredLyricsProvider.asStateFlow()
+
+    private var lyricsJob: Job? = null
+    @Volatile
+    private var lastLyricsTrackKey: String = ""
 
     @Volatile
     private var currentArtworkBytes: ByteArray? = null
@@ -112,6 +199,13 @@ object MediaBridgeStateHolder {
     private const val PREFS_SYNC_NAME = "clawd_bridge_sync_prefs"
     private const val KEY_SYNC_OFFSET_MS = "sync_offset_ms"
     private const val KEY_DYNAMIC_BACKGROUND_ENABLED = "dynamic_background_enabled"
+    private const val KEY_BACKGROUND_STYLE = "background_style"
+    private const val KEY_PLAYER_COVER_STYLE = "player_cover_style"
+    private const val KEY_PLAYER_TITLE_ALIGN = "player_title_align"
+    private const val KEY_PLAYER_SWIPE_SKIP = "player_swipe_skip"
+    private const val KEY_PLAYER_WAVY_SEEK = "player_wavy_seek"
+    private const val KEY_PLAYER_BG_MODE = "player_bg_mode"
+    private const val KEY_PLAYER_ACCENT_SRC = "player_accent_src"
     const val MIN_SYNC_OFFSET_MS = -2000
     const val MAX_SYNC_OFFSET_MS = 2000
 
@@ -120,6 +214,12 @@ object MediaBridgeStateHolder {
 
     private val _dynamicBackgroundEnabled = MutableStateFlow(true)
     val dynamicBackgroundEnabled: StateFlow<Boolean> = _dynamicBackgroundEnabled.asStateFlow()
+
+    private val _backgroundStyle = MutableStateFlow(BackgroundStyle.LIQUID_SILK)
+    val backgroundStyle: StateFlow<BackgroundStyle> = _backgroundStyle.asStateFlow()
+
+    private val _playerStyleConfig = MutableStateFlow(PlayerStyleConfig())
+    val playerStyleConfig: StateFlow<PlayerStyleConfig> = _playerStyleConfig.asStateFlow()
 
     private val requestCounter = AtomicLong(0L)
     private val lastPushedSignature = AtomicReference<String>("")
@@ -135,6 +235,8 @@ object MediaBridgeStateHolder {
             _syncOffsetMs.value = sp.getInt(KEY_SYNC_OFFSET_MS, 0)
                 .coerceIn(MIN_SYNC_OFFSET_MS, MAX_SYNC_OFFSET_MS)
             _dynamicBackgroundEnabled.value = sp.getBoolean(KEY_DYNAMIC_BACKGROUND_ENABLED, true)
+            _backgroundStyle.value = BackgroundStyle.fromId(sp.getString(KEY_BACKGROUND_STYLE, null))
+            _playerStyleConfig.value = readPlayerStyle(sp)
 
             val listener = SharedPreferences.OnSharedPreferenceChangeListener { prefs, key ->
                 when (key) {
@@ -146,11 +248,57 @@ object MediaBridgeStateHolder {
                         _syncOffsetMs.value = prefs.getInt(KEY_SYNC_OFFSET_MS, 0)
                             .coerceIn(MIN_SYNC_OFFSET_MS, MAX_SYNC_OFFSET_MS)
                     }
+                    KEY_BACKGROUND_STYLE -> {
+                        _backgroundStyle.value = BackgroundStyle.fromId(
+                            prefs.getString(KEY_BACKGROUND_STYLE, null)
+                        )
+                    }
+                    KEY_PLAYER_COVER_STYLE,
+                    KEY_PLAYER_TITLE_ALIGN,
+                    KEY_PLAYER_SWIPE_SKIP,
+                    KEY_PLAYER_WAVY_SEEK,
+                    KEY_PLAYER_BG_MODE,
+                    KEY_PLAYER_ACCENT_SRC -> {
+                        _playerStyleConfig.value = readPlayerStyle(prefs)
+                    }
                 }
             }
             prefsChangeListener = listener
             sp.registerOnSharedPreferenceChangeListener(listener)
         }
+    }
+
+    private fun readPlayerStyle(sp: SharedPreferences): PlayerStyleConfig {
+        return PlayerStyleConfig(
+            coverStyle = PlayerCoverStyle.fromId(sp.getString(KEY_PLAYER_COVER_STYLE, null)),
+            titleAlignment = PlayerTitleAlignment.fromId(sp.getString(KEY_PLAYER_TITLE_ALIGN, null)),
+            swipeCoverToSkip = sp.getBoolean(KEY_PLAYER_SWIPE_SKIP, true),
+            wavySeekbarEnabled = sp.getBoolean(KEY_PLAYER_WAVY_SEEK, true),
+            backgroundMode = PlayerBackgroundMode.fromId(sp.getString(KEY_PLAYER_BG_MODE, null)),
+            accentSource = PlayerAccentSource.fromId(sp.getString(KEY_PLAYER_ACCENT_SRC, null))
+        )
+    }
+
+    fun setBackgroundStyle(style: BackgroundStyle) {
+        _backgroundStyle.value = style
+        appContext?.getSharedPreferences(PREFS_SYNC_NAME, Context.MODE_PRIVATE)
+            ?.edit()
+            ?.putString(KEY_BACKGROUND_STYLE, style.id)
+            ?.apply()
+    }
+
+    fun updatePlayerStyle(transform: (PlayerStyleConfig) -> PlayerStyleConfig) {
+        val next = transform(_playerStyleConfig.value)
+        _playerStyleConfig.value = next
+        appContext?.getSharedPreferences(PREFS_SYNC_NAME, Context.MODE_PRIVATE)
+            ?.edit()
+            ?.putString(KEY_PLAYER_COVER_STYLE, next.coverStyle.id)
+            ?.putString(KEY_PLAYER_TITLE_ALIGN, next.titleAlignment.id)
+            ?.putBoolean(KEY_PLAYER_SWIPE_SKIP, next.swipeCoverToSkip)
+            ?.putBoolean(KEY_PLAYER_WAVY_SEEK, next.wavySeekbarEnabled)
+            ?.putString(KEY_PLAYER_BG_MODE, next.backgroundMode.id)
+            ?.putString(KEY_PLAYER_ACCENT_SRC, next.accentSource.id)
+            ?.apply()
     }
 
     fun setDynamicBackgroundEnabled(enabled: Boolean) {
@@ -180,11 +328,120 @@ object MediaBridgeStateHolder {
         }
     }
 
+    // ---- Media Transport Controls (works seamlessly for MediaController & TestMediaSimulator) ----
+
+    fun togglePlayPause() {
+        if (TestMediaSimulator.isSimulatorActive.value) {
+            if (TestMediaSimulator.isPlaying.value) TestMediaSimulator.pause()
+            else TestMediaSimulator.play()
+            return
+        }
+        val controller = activeController.get() ?: return
+        runCatching {
+            val playing = controller.playbackState?.state == PlaybackState.STATE_PLAYING
+            if (playing) controller.transportControls.pause()
+            else controller.transportControls.play()
+        }
+    }
+
+    fun skipToNext() {
+        if (TestMediaSimulator.isSimulatorActive.value) {
+            TestMediaSimulator.nextTrack()
+            return
+        }
+        val controller = activeController.get() ?: return
+        runCatching { controller.transportControls.skipToNext() }
+    }
+
+    fun skipToPrevious() {
+        if (TestMediaSimulator.isSimulatorActive.value) {
+            TestMediaSimulator.previousTrack()
+            return
+        }
+        val controller = activeController.get() ?: return
+        runCatching { controller.transportControls.skipToPrevious() }
+    }
+
+    fun seekToPosition(positionMs: Long) {
+        val clamped = positionMs.coerceAtLeast(0L)
+        if (TestMediaSimulator.isSimulatorActive.value) {
+            TestMediaSimulator.seekTo(clamped)
+            return
+        }
+        val controller = activeController.get() ?: return
+        runCatching {
+            controller.transportControls.seekTo(clamped)
+            refreshSnapshot(forcePush = true)
+        }
+    }
+
+    fun seekByDelta(deltaMs: Long) {
+        val snap = _playerUiState.value
+        if (!snap.hasMedia) return
+        val currentRaw = if (TestMediaSimulator.isSimulatorActive.value) {
+            TestMediaSimulator.getEstimatedPositionMs()
+        } else {
+            val ctrl = activeController.get()
+            val st = ctrl?.playbackState
+            if (st != null) calculatePosition(st, snap.durationMs).first else snap.positionMs
+        }
+        val target = if (snap.durationMs > 0L) {
+            (currentRaw + deltaMs).coerceIn(0L, snap.durationMs)
+        } else {
+            (currentRaw + deltaMs).coerceAtLeast(0L)
+        }
+        seekToPosition(target)
+    }
+
+    // ---- Lyrics Resolution for Built-in Player ----
+
+    fun loadLyricsForCurrentTrack(
+        forceRefresh: Boolean = false,
+        preferredProvider: String? = null
+    ) {
+        val track = _playerUiState.value.takeIf { it.hasMedia }
+            ?: _liveState.value.takeIf { it.hasMedia }
+            ?: return
+        val effectiveProvider = preferredProvider ?: _preferredLyricsProvider.value
+        if (preferredProvider != null) {
+            _preferredLyricsProvider.value = preferredProvider
+        }
+        val trackKey = "${track.artist}|${track.title}"
+        if (!forceRefresh && preferredProvider == null && lastLyricsTrackKey == trackKey) {
+            val current = _lyricsUiState.value
+            if (current is PlayerLyricsUiState.Loaded && current.trackKey == trackKey ||
+                current is PlayerLyricsUiState.Loading && current.trackKey == trackKey
+            ) {
+                return
+            }
+        }
+        lastLyricsTrackKey = trackKey
+        lyricsJob?.cancel()
+        lyricsJob = ioScope.launch {
+            _lyricsUiState.value = PlayerLyricsUiState.Loading(trackKey)
+            try {
+                val res = LyricsCatalogResolver.resolveLyrics(
+                    rawArtist = track.artist,
+                    rawTitle = track.title,
+                    forceRefresh = forceRefresh,
+                    preferredProvider = effectiveProvider.takeIf { it != "auto" }
+                )
+                _lyricsUiState.value = PlayerLyricsUiState.Loaded(trackKey, res)
+            } catch (t: Throwable) {
+                _lyricsUiState.value = PlayerLyricsUiState.Error(
+                    trackKey,
+                    t.message ?: "Не удалось загрузить текст"
+                )
+            }
+        }
+    }
+
     fun setServiceConnected(connected: Boolean) {
         _isServiceConnected.value = connected
         if (!connected && simulatedState.get() == null && !TestMediaSimulator.isSimulatorActive.value) {
             clearArtwork()
             updateLiveState(NowPlayingData.IDLE, forcePush = true)
+            _playerUiState.value = NowPlayingData.IDLE
         }
     }
 
@@ -279,37 +536,41 @@ object MediaBridgeStateHolder {
     fun getCurrentSnapshot(forcePush: Boolean = false): NowPlayingData {
         // Priority 1: Built-in simulator if active
         if (TestMediaSimulator.isSimulatorActive.value) {
+            val track = TestMediaSimulator.currentTrack
             val isPlaying = TestMediaSimulator.isPlaying.value
-            val snapshot = if (isPlaying) {
-                val simArt = resolveSimulatorArtwork()
-                val rawPos = TestMediaSimulator.getEstimatedPositionMs()
-                val duration = TestMediaSimulator.durationMs
-                val clampedPos = applyOffset(rawPos.coerceIn(0L, duration), duration, _syncOffsetMs.value)
-                val sec = clampedPos / 1000.0
-                NowPlayingData(
-                    hasMedia = true,
-                    player = TestMediaSimulator.playerPackage,
-                    artist = TestMediaSimulator.artistName,
-                    title = TestMediaSimulator.trackTitle,
-                    album = TestMediaSimulator.albumName,
-                    positionMs = clampedPos,
-                    durationMs = duration,
-                    positionSec = sec,
-                    playbackSpeed = 1.0f,
-                    isPlaying = true,
-                    positionKnown = true,
-                    accentColorHex = simArt.accentColorHex,
-                    accentColorsHex = simArt.accentColorsHex,
-                    hasArtwork = true,
-                    timestamp = System.currentTimeMillis()
-                )
-            } else {
-                clearArtwork()
-                NowPlayingData(
-                    hasMedia = false,
-                    isPlaying = false,
-                    positionKnown = true
-                )
+            val simArt = resolveSimulatorArtwork()
+            val rawPos = TestMediaSimulator.getEstimatedPositionMs()
+            val duration = track.durationMs
+            val clampedPos = applyOffset(rawPos.coerceIn(0L, duration), duration, _syncOffsetMs.value)
+            val sec = clampedPos / 1000.0
+            val uiTrack = NowPlayingData(
+                hasMedia = true,
+                player = track.playerPackage,
+                artist = track.artist,
+                title = track.title,
+                album = track.album,
+                positionMs = clampedPos,
+                durationMs = duration,
+                positionSec = sec,
+                playbackSpeed = 1.0f,
+                isPlaying = isPlaying,
+                positionKnown = true,
+                accentColorHex = simArt.accentColorHex,
+                accentColorsHex = simArt.accentColorsHex,
+                extendedColorsHex = simArt.extendedColorsHex,
+                gridColorsHex = simArt.gridColorsHex,
+                hasArtwork = true,
+                timestamp = System.currentTimeMillis()
+            )
+            _playerUiState.value = uiTrack
+
+            val snapshot = if (isPlaying) uiTrack else NowPlayingData(
+                hasMedia = false,
+                isPlaying = false,
+                positionKnown = true
+            )
+            if (!isPlaying && _artworkBitmap.value == null) {
+                _artworkBitmap.value = simArt.thumbnail
             }
             updateLiveState(snapshot, forcePush = forcePush)
             BackupFileWriter.scheduleWrite(snapshot)
@@ -320,6 +581,7 @@ object MediaBridgeStateHolder {
         val controller = activeController.get() ?: run {
             clearArtwork()
             val idle = NowPlayingData.IDLE
+            _playerUiState.value = idle
             updateLiveState(idle, forcePush = forcePush)
             BackupFileWriter.scheduleWrite(idle)
             return idle
@@ -327,9 +589,14 @@ object MediaBridgeStateHolder {
 
         return try {
             val state = controller.playbackState
-            if (state == null || state.state != PlaybackState.STATE_PLAYING) {
+            val isPlaying = state?.state == PlaybackState.STATE_PLAYING
+            val isPausedRetained = state?.state == PlaybackState.STATE_PAUSED ||
+                state?.state == PlaybackState.STATE_BUFFERING
+
+            if (state == null || (!isPlaying && !isPausedRetained)) {
                 clearArtwork()
                 val idle = NowPlayingData.IDLE
+                _playerUiState.value = idle
                 updateLiveState(idle, forcePush = forcePush)
                 BackupFileWriter.scheduleWrite(idle)
                 return idle
@@ -359,7 +626,7 @@ object MediaBridgeStateHolder {
                 extractedArt.accentColorsHex
             }
 
-            val snapshot = NowPlayingData(
+            val fullTrack = NowPlayingData(
                 hasMedia = true,
                 player = packageName,
                 artist = artist,
@@ -369,20 +636,29 @@ object MediaBridgeStateHolder {
                 durationMs = duration,
                 positionSec = posSec,
                 playbackSpeed = speed,
-                isPlaying = true,
+                isPlaying = isPlaying,
                 positionKnown = positionKnown,
                 accentColorHex = extractedArt?.accentColorHex ?: fallbackPalette.first(),
                 accentColorsHex = fallbackPalette,
+                extendedColorsHex = extractedArt?.extendedColorsHex ?: fallbackPalette,
+                gridColorsHex = extractedArt?.gridColorsHex ?: emptyList(),
                 hasArtwork = extractedArt != null,
                 timestamp = System.currentTimeMillis()
             )
+            _playerUiState.value = fullTrack
 
-            updateLiveState(snapshot, forcePush = forcePush)
-            BackupFileWriter.scheduleWrite(snapshot)
-            snapshot
-        } catch (e: Exception) {
+            val externalSnapshot = if (isPlaying) fullTrack else NowPlayingData(
+                hasMedia = false,
+                isPlaying = false,
+                positionKnown = true
+            )
+            updateLiveState(externalSnapshot, forcePush = forcePush)
+            BackupFileWriter.scheduleWrite(externalSnapshot)
+            externalSnapshot
+        } catch (_: Exception) {
             clearArtwork()
             val fallback = NowPlayingData.IDLE
+            _playerUiState.value = fallback
             updateLiveState(fallback, forcePush = forcePush)
             fallback
         }
@@ -393,19 +669,26 @@ object MediaBridgeStateHolder {
     }
 
     private fun resolveSimulatorArtwork(): ExtractedArtwork {
-        val key = "simulator|${TestMediaSimulator.artistName}|${TestMediaSimulator.trackTitle}"
+        val track = TestMediaSimulator.currentTrack
+        val key = "simulator|${track.artist}|${track.title}"
         synchronized(artworkLock) {
             val existing = cachedExtractedArtwork
             if (cachedTrackKey == key && existing != null) {
+                _artworkBitmap.value = existing.thumbnail
+                _artworkDebugStatus.value = "Готова • ${existing.thumbnail.width}×${existing.thumbnail.height} (Симулятор)"
                 return existing
             }
-            val created = ArtworkExtractor.createSimulatorArtwork()
+            val created = ArtworkExtractor.createSimulatorArtwork(
+                c1 = track.color1,
+                c2 = track.color2,
+                c3 = track.color3
+            )
             cachedTrackKey = key
             cachedArtworkSourceKey = key
             cachedExtractedArtwork = created
             currentArtworkBytes = created.jpegBytes
             _artworkBitmap.value = created.thumbnail
-            _artworkDebugStatus.value = "Simulator gradient"
+            _artworkDebugStatus.value = "Готова • ${created.thumbnail.width}×${created.thumbnail.height} (Симулятор)"
             return created
         }
     }
@@ -446,8 +729,10 @@ object MediaBridgeStateHolder {
                 cachedArtworkSourceKey = ""
                 cachedExtractedArtwork = trackArtworkCache[trackKey]
                 if (cachedExtractedArtwork != null) {
+                    val bmp = cachedExtractedArtwork!!.thumbnail
                     currentArtworkBytes = cachedExtractedArtwork!!.jpegBytes
-                    _artworkBitmap.value = cachedExtractedArtwork!!.thumbnail
+                    _artworkBitmap.value = bmp
+                    _artworkDebugStatus.value = "Готова • ${bmp.width}×${bmp.height} (Кэш)"
                 } else {
                     currentArtworkBytes = null
                     _artworkBitmap.value = null
@@ -456,6 +741,11 @@ object MediaBridgeStateHolder {
                 inFlightArtKey = ""
                 catalogFallbackAttemptedKey = ""
             } else if (cachedExtractedArtwork != null && (cachedArtworkSourceKey == sourceKey || (inlineBitmap == null && !notifEntryUsable))) {
+                val bmp = cachedExtractedArtwork!!.thumbnail
+                if (_artworkBitmap.value == null) _artworkBitmap.value = bmp
+                if (_artworkDebugStatus.value == "Ожидание трека") {
+                    _artworkDebugStatus.value = "Готова • ${bmp.width}×${bmp.height}"
+                }
                 return cachedExtractedArtwork
             }
 
@@ -479,10 +769,12 @@ object MediaBridgeStateHolder {
 
             // Return LRU cached cover immediately if already fetched
             if (cachedExtractedArtwork != null) {
+                val bmp = cachedExtractedArtwork!!.thumbnail
+                _artworkDebugStatus.value = "Готова • ${bmp.width}×${bmp.height} (Кэш)"
                 return cachedExtractedArtwork
             }
 
-            // 3. Async URI (content://, file://, https://) + 5-Provider Public Waterfall
+            // 3. Async URI (content://, file://, https://) + Public Waterfall
             val ctx = appContext
             if (!effectiveUri.isNullOrBlank() && ctx != null) {
                 val uriRequestKey = "$trackKey|$effectiveUri"
@@ -507,7 +799,7 @@ object MediaBridgeStateHolder {
                 return null
             }
 
-            // 4. Local sources absent/blocked -> run 5-Provider Waterfall once per track
+            // 4. Local sources absent/blocked -> run Waterfall once per track
             if (catalogFallbackAttemptedKey != trackKey && inFlightArtKey != trackKey && (artist.isNotBlank() || title.isNotBlank())) {
                 catalogFallbackAttemptedKey = trackKey
                 inFlightArtKey = trackKey
@@ -544,7 +836,7 @@ object MediaBridgeStateHolder {
         trackArtworkCache[trackKey] = extracted
         currentArtworkBytes = extracted.jpegBytes
         _artworkBitmap.value = extracted.thumbnail
-        _artworkDebugStatus.value = debugNote
+        _artworkDebugStatus.value = "Готова • ${extracted.thumbnail.width}×${extracted.thumbnail.height} ($debugNote)"
     }
 
     private fun fetchArtworkWithWaterfallAsync(

@@ -7,18 +7,66 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
+data class SimulatorTrack(
+    val playerPackage: String,
+    val artist: String,
+    val title: String,
+    val album: String,
+    val durationMs: Long,
+    val color1: Int,
+    val color2: Int,
+    val color3: Int
+)
+
 /**
- * Built-in test simulator allowing instant diagnostics and verification
- * without external streaming apps.
- * Operates purely on SystemClock.elapsedRealtime() (ТЗ v1.3).
+ * Built-in multi-track test simulator allowing instant diagnostics,
+ * cover-swipe / next-prev verification, and synced lyrics testing without external apps.
  */
 object TestMediaSimulator {
 
-    const val playerPackage = "com.soundcloud.android"
-    const val artistName = "Juice WRLD"
-    const val trackTitle = "Lean Wit Me"
-    const val albumName = "Goodbye & Good Riddance"
-    const val durationMs = 175000L
+    private val playlist = listOf(
+        SimulatorTrack(
+            playerPackage = "com.soundcloud.android",
+            artist = "Juice WRLD",
+            title = "Lean Wit Me",
+            album = "Goodbye & Good Riddance",
+            durationMs = 175000L,
+            color1 = 0xFF3A1C71.toInt(),
+            color2 = 0xFFD76D77.toInt(),
+            color3 = 0xFFFFAF7B.toInt()
+        ),
+        SimulatorTrack(
+            playerPackage = "com.spotify.music",
+            artist = "The Weeknd",
+            title = "Blinding Lights",
+            album = "After Hours",
+            durationMs = 200000L,
+            color1 = 0xFF7F1D1D.toInt(),
+            color2 = 0xFFEF4444.toInt(),
+            color3 = 0xFF06B6D4.toInt()
+        ),
+        SimulatorTrack(
+            playerPackage = "ru.yandex.music",
+            artist = "Daft Punk",
+            title = "Get Lucky",
+            album = "Random Access Memories",
+            durationMs = 248000L,
+            color1 = 0xFF1E1B4B.toInt(),
+            color2 = 0xFFF59E0B.toInt(),
+            color3 = 0xFF38BDF8.toInt()
+        )
+    )
+
+    private var currentIndex = 0
+
+    val currentTrack: SimulatorTrack
+        get() = playlist[currentIndex]
+
+    val playerPackage: String get() = currentTrack.playerPackage
+    val artistName: String get() = currentTrack.artist
+    val trackTitle: String get() = currentTrack.title
+    val albumName: String get() = currentTrack.album
+    val durationMs: Long get() = currentTrack.durationMs
 
     private val _isSimulatorActive = MutableStateFlow(false)
     val isSimulatorActive: StateFlow<Boolean> = _isSimulatorActive.asStateFlow()
@@ -57,6 +105,24 @@ object TestMediaSimulator {
         }
     }
 
+    fun nextTrack() {
+        currentIndex = (currentIndex + 1) % playlist.size
+        currentPositionMs = 15000L
+        lastStartTime = SystemClock.elapsedRealtime()
+        if (!_isSimulatorActive.value) _isSimulatorActive.value = true
+        _isPlaying.value = true
+        syncState()
+    }
+
+    fun previousTrack() {
+        currentIndex = (currentIndex - 1 + playlist.size) % playlist.size
+        currentPositionMs = 15000L
+        lastStartTime = SystemClock.elapsedRealtime()
+        if (!_isSimulatorActive.value) _isSimulatorActive.value = true
+        _isPlaying.value = true
+        syncState()
+    }
+
     fun seekTo(positionMs: Long) {
         currentPositionMs = positionMs.coerceIn(0L, durationMs)
         lastStartTime = SystemClock.elapsedRealtime()
@@ -78,16 +144,17 @@ object TestMediaSimulator {
             return
         }
 
+        val track = currentTrack
         val pos = getEstimatedPositionMs()
         val data = if (_isPlaying.value) {
             NowPlayingData(
                 hasMedia = true,
-                player = playerPackage,
-                artist = artistName,
-                title = trackTitle,
-                album = albumName,
+                player = track.playerPackage,
+                artist = track.artist,
+                title = track.title,
+                album = track.album,
                 positionMs = pos,
-                durationMs = durationMs,
+                durationMs = track.durationMs,
                 positionSec = pos / 1000.0,
                 playbackSpeed = 1.0f,
                 isPlaying = true,

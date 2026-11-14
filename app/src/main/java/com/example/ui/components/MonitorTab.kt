@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
@@ -117,6 +118,7 @@ fun MonitorTab(
     isSimulatorActive: Boolean,
     isSimulatorPlaying: Boolean,
     onForceRebind: () -> Unit,
+    onOpenFullscreenPlayer: () -> Unit,
     onToggleSimulator: (Boolean) -> Unit,
     onPlayPauseSimulator: () -> Unit,
     onSeekForwardSimulator: () -> Unit,
@@ -142,7 +144,8 @@ fun MonitorTab(
             liveState = liveState,
             artworkBitmap = artworkBitmap,
             livingPalette = livingPalette,
-            isSimulatorActive = isSimulatorActive
+            isSimulatorActive = isSimulatorActive,
+            onOpenFullscreenPlayer = onOpenFullscreenPlayer
         )
 
         SimulatorCard(
@@ -286,7 +289,8 @@ private fun HeroLiveMonitorCard(
     liveState: NowPlayingData,
     artworkBitmap: Bitmap?,
     livingPalette: LivingPaletteState,
-    isSimulatorActive: Boolean
+    isSimulatorActive: Boolean,
+    onOpenFullscreenPlayer: () -> Unit
 ) {
     val context = LocalContext.current
     val hasMedia = liveState.hasMedia
@@ -342,6 +346,8 @@ private fun HeroLiveMonitorCard(
     FrostedGlassCard(
         modifier = Modifier
             .fillMaxWidth()
+            .clip(RoundedCornerShape(26.dp))
+            .clickable(enabled = hasMedia) { onOpenFullscreenPlayer() }
             .testTag("live_monitor_card"),
         containerColor = cardBaseColor,
         cornerRadius = 26.dp,
@@ -474,6 +480,23 @@ private fun HeroLiveMonitorCard(
                                         color = TextSecondary,
                                         fontWeight = FontWeight.SemiBold
                                     )
+                                )
+                            }
+                        }
+
+                        if (hasMedia) {
+                            Box(
+                                modifier = Modifier
+                                    .size(26.dp)
+                                    .clip(CircleShape)
+                                    .background(NestedSurface),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.OpenInFull,
+                                    contentDescription = "Открыть встроенный плеер",
+                                    tint = playerAccent,
+                                    modifier = Modifier.size(13.dp)
                                 )
                             }
                         }
@@ -692,7 +715,7 @@ private fun HeroLiveMonitorCard(
 }
 
 @Composable
-private fun MiniEqualizerBars(
+internal fun MiniEqualizerBars(
     isPlaying: Boolean,
     color: Color,
     timeSecondsState: State<Float>,
@@ -746,7 +769,7 @@ private fun MiniEqualizerBars(
 }
 
 @Composable
-private fun WavyPlaybackProgressBar(
+internal fun WavyPlaybackProgressBar(
     fraction: Float,
     isPlaying: Boolean,
     activeColor: Color,
@@ -878,7 +901,7 @@ private fun SimulatorCard(
                         )
                     )
                     Text(
-                        text = "Juice WRLD — Lean Wit Me (с обложкой и SSE)",
+                        text = "Плейлист из 3 треков с обложкой, лирикой и SSE",
                         style = MaterialTheme.typography.bodySmall.copy(color = TextMuted)
                     )
                 }

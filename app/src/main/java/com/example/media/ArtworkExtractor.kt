@@ -18,10 +18,9 @@ import android.media.MediaMetadata
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import com.example.network.BridgeHttpClient
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
-import java.net.HttpURLConnection
-import java.net.URL
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.min
@@ -32,7 +31,9 @@ data class ExtractedArtwork(
     val accentColorInt: Int,
     val accentColorHex: String,
     val accentColorInts: List<Int>,
-    val accentColorsHex: List<String>
+    val accentColorsHex: List<String>,
+    val extendedColorsHex: List<String> = accentColorsHex,
+    val gridColorsHex: List<String> = emptyList()
 )
 
 data class NotificationArtProbe(
@@ -409,31 +410,18 @@ object ArtworkExtractor {
         }
     }
 
-    internal fun downloadHttpBytes(urlString: String, timeoutMs: Int = 4000): Pair<ByteArray?, String> {
-        var conn: HttpURLConnection? = null
-        return try {
-            conn = (URL(urlString).openConnection() as HttpURLConnection).apply {
-                connectTimeout = timeoutMs
-                readTimeout = timeoutMs
-                instanceFollowRedirects = true
-                requestMethod = "GET"
-                setRequestProperty("User-Agent", BROWSER_USER_AGENT)
-                setRequestProperty("Accept", "image/avif,image/webp,image/apng,image/*,application/json,text/html;q=0.9,*/*;q=0.8")
-                setRequestProperty("Accept-Language", "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7")
-            }
-            val code = conn.responseCode
-            if (code !in 200..299) {
-                return Pair(null, "http:$code")
-            }
-            val bytes = conn.inputStream?.use { stream ->
-                readLimitedBytes(stream, MAX_REMOTE_IMAGE_BYTES)
-            }
-            Pair(bytes, "http:$code")
-        } catch (t: Throwable) {
-            Pair(null, "http:${t.javaClass.simpleName}")
-        } finally {
-            conn?.disconnect()
-        }
+    internal fun downloadHttpBytes(urlString: String, @Suppress("UNUSED_PARAMETER") timeoutMs: Int = 10000): Pair<ByteArray?, String> {
+        return BridgeHttpClient.getBytes(
+            url = urlString,
+            useCatalogClient = true,
+            headers = mapOf(
+                "User-Agent" to BridgeHttpClient.BROWSER_USER_AGENT,
+                "Accept" to "image/avif,image/webp,image/apng,image/*,application/json,text/html;q=0.9,*/*;q=0.8",
+                "Accept-Language" to "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"
+            ),
+            maxBytes = MAX_REMOTE_IMAGE_BYTES,
+            maxRetries = 1
+        )
     }
 
     private fun readLimitedBytes(input: InputStream, maxBytes: Int): ByteArray? {
@@ -480,6 +468,8 @@ object ArtworkExtractor {
         val primaryInt = 0xFF000000.toInt() or smart.playerAccentRgb
         val paletteInts = smart.paletteTriadRgb.map { 0xFF000000.toInt() or it }
         val paletteHex = paletteInts.map { toHexString(it) }
+        val extendedHex = smart.paletteExtendedRgb.map { toHexString(0xFF000000.toInt() or it) }
+        val gridHex = smart.spatialGrid3x3Rgb.map { toHexString(0xFF000000.toInt() or it) }
         val primaryHex = toHexString(primaryInt)
 
         return ExtractedArtwork(
@@ -488,11 +478,17 @@ object ArtworkExtractor {
             accentColorInt = primaryInt,
             accentColorHex = primaryHex,
             accentColorInts = paletteInts,
-            accentColorsHex = paletteHex
+            accentColorsHex = paletteHex,
+            extendedColorsHex = extendedHex,
+            gridColorsHex = gridHex
         )
     }
 
-    fun createSimulatorArtwork(): ExtractedArtwork {
+    fun createSimulatorArtwork(
+        c1: Int = 0xFF3A1C71.toInt(),
+        c2: Int = 0xFFD76D77.toInt(),
+        c3: Int = 0xFFFFAF7B.toInt()
+    ): ExtractedArtwork {
         val size = ARTWORK_SIZE_PX
         val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bmp)
@@ -500,7 +496,7 @@ object ArtworkExtractor {
         val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             shader = LinearGradient(
                 0f, 0f, size.toFloat(), size.toFloat(),
-                intArrayOf(0xFF3A1C71.toInt(), 0xFFD76D77.toInt(), 0xFFFFAF7B.toInt()),
+                intArrayOf(c1, c2, c3),
                 floatArrayOf(0f, 0.55f, 1f),
                 Shader.TileMode.CLAMP
             )
@@ -515,17 +511,21 @@ object ArtworkExtractor {
         canvas.drawCircle(size / 2f, size / 2f, size * 0.34f, ringPaint)
         canvas.drawCircle(size / 2f, size / 2f, size * 0.14f, ringPaint)
 
-        val bytes = compressToJpeg(bmp)
-        val paletteInts = listOf(0xFFFF6D7A.toInt(), 0xFFFFAF7B.toInt(), 0xFF8B5CF6.toInt())
-        val paletteHex = paletteInts.map { toHexString(it) }
-        return ExtractedArtwork(
-            thumbnail = bmp,
-            jpegBytes = bytes,
-            accentColorInt = paletteInts[0],
-            accentColorHex = paletteHex[0],
-            accentColorInts = paletteInts,
-            accentColorsHex = paletteHex
-        )
+        return fromBitmap(bmp) ?: run {
+            val bytes = compressToJpeg(bmp)
+            val paletteInts = listOf(c2, c3, c1)
+            val paletteHex = paletteInts.map { toHexString(it) }
+            ExtractedArtwork(
+                thumbnail = bmp,
+                jpegBytes = bytes,
+                accentColorInt = paletteInts[0],
+                accentColorHex = paletteHex[0],
+                accentColorInts = paletteInts,
+                accentColorsHex = paletteHex,
+                extendedColorsHex = paletteHex + listOf("#1E1B4B", "#FDE68A", "#7C3AED"),
+                gridColorsHex = List(9) { idx -> paletteHex[idx % paletteHex.size] }
+            )
+        }
     }
 
     internal fun createSquareThumbnail(source: Bitmap, targetSize: Int): Bitmap {

@@ -16,8 +16,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.Crossfade
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -26,7 +24,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -37,6 +34,8 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -61,6 +60,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -92,6 +92,7 @@ import com.example.simulator.TestMediaSimulator
 import com.example.state.MediaBridgeStateHolder
 import com.example.storage.BackupFileWriter
 import com.example.ui.components.DiagnosticsTab
+import com.example.ui.components.FullscreenPlayerOverlay
 import com.example.ui.components.MonitorTab
 import com.example.ui.components.PluginSyncCard
 import com.example.ui.theme.ActivePillSurface
@@ -111,6 +112,7 @@ import com.example.ui.theme.withTabularNumbers
 import com.example.updater.BridgeAppUpdater
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlin.math.sin
 
 private data class BridgeNavTab(
@@ -155,13 +157,17 @@ fun ClawdBridgeMainApp() {
     val lifecycleOwner = LocalLifecycleOwner.current
     val haptic = LocalHapticFeedback.current
 
-    var selectedTab by remember { mutableIntStateOf(0) }
+    val uiScope = rememberCoroutineScope()
+    val pagerState = rememberPagerState(initialPage = 0, pageCount = { BRIDGE_TABS.size })
+    var isSliderDragging by remember { mutableStateOf(false) }
+    var isFullscreenPlayerOpen by remember { mutableStateOf(false) }
 
-    BackHandler(enabled = selectedTab != 0) {
-        selectedTab = 0
+    BackHandler(enabled = !isFullscreenPlayerOpen && pagerState.currentPage != 0) {
+        uiScope.launch { pagerState.animateScrollToPage(0) }
     }
 
     val liveState by MediaBridgeStateHolder.liveState.collectAsStateWithLifecycle()
+    val playerUiState by MediaBridgeStateHolder.playerUiState.collectAsStateWithLifecycle()
     val artworkBitmap by MediaBridgeStateHolder.artworkBitmap.collectAsStateWithLifecycle()
     val isServiceConnected by MediaBridgeStateHolder.isServiceConnected.collectAsStateWithLifecycle()
     val requestCount by MediaBridgeStateHolder.requestCount.collectAsStateWithLifecycle()
@@ -178,12 +184,29 @@ fun ClawdBridgeMainApp() {
     val discoveredApps by AppFilterManager.discoveredApps.collectAsStateWithLifecycle()
     val syncOffsetMs by MediaBridgeStateHolder.syncOffsetMs.collectAsStateWithLifecycle()
     val dynamicBackgroundEnabled by MediaBridgeStateHolder.dynamicBackgroundEnabled.collectAsStateWithLifecycle()
+    val backgroundStyle by MediaBridgeStateHolder.backgroundStyle.collectAsStateWithLifecycle()
+    val playerStyleConfig by MediaBridgeStateHolder.playerStyleConfig.collectAsStateWithLifecycle()
+    val lyricsUiState by MediaBridgeStateHolder.lyricsUiState.collectAsStateWithLifecycle()
+    val preferredLyricsProvider by MediaBridgeStateHolder.preferredLyricsProvider.collectAsStateWithLifecycle()
     val artworkDebugStatus by MediaBridgeStateHolder.artworkDebugStatus.collectAsStateWithLifecycle()
 
+    LaunchedEffect(playerUiState.hasMedia) {
+        if (!playerUiState.hasMedia) {
+            isFullscreenPlayerOpen = false
+        }
+    }
+
+    LaunchedEffect(isFullscreenPlayerOpen, playerUiState.artist, playerUiState.title) {
+        if (isFullscreenPlayerOpen && playerUiState.hasMedia) {
+            MediaBridgeStateHolder.loadLyricsForCurrentTrack()
+        }
+    }
+
     val livingPalette = rememberLivingPaletteState(
-        liveState = liveState,
+        liveState = if (isFullscreenPlayerOpen && playerUiState.hasMedia) playerUiState else liveState,
         artworkBitmap = artworkBitmap,
-        dynamicBackgroundEnabled = dynamicBackgroundEnabled
+        dynamicBackgroundEnabled = dynamicBackgroundEnabled,
+        backgroundStyle = backgroundStyle
     )
 
     var isNotificationAccessGranted by remember {
@@ -278,8 +301,10 @@ fun ClawdBridgeMainApp() {
             },
             bottomBar = {
                 FloatingGlassBottomBar(
-                    selectedTab = selectedTab,
-                    onSelectTab = { selectedTab = it }
+                    selectedTab = pagerState.currentPage,
+                    onSelectTab = { idx ->
+                        uiScope.launch { pagerState.animateScrollToPage(idx) }
+                    }
                 )
             }
         ) { innerPadding ->
@@ -290,19 +315,22 @@ fun ClawdBridgeMainApp() {
                     .padding(innerPadding)
                     .progressiveVerticalEdgeFade()
             ) {
-                Column(
+                HorizontalPager(
+                    state = pagerState,
+                    beyondViewportPageCount = 2,
+                    userScrollEnabled = !isSliderDragging && !isFullscreenPlayerOpen,
                     modifier = Modifier
                         .fillMaxSize()
-                        .verticalScroll(rememberScrollState())
-                        .padding(horizontal = 16.dp, vertical = 14.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
-                    Crossfade(
-                        targetState = selectedTab,
-                        animationSpec = tween(durationMillis = 200),
-                        label = "bridge_tab_crossfade"
-                    ) { tabIndex ->
-                        when (tabIndex) {
+                        .testTag("main_horizontal_pager")
+                ) { pageIndex ->
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(rememberScrollState())
+                            .padding(horizontal = 16.dp, vertical = 14.dp),
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        when (pageIndex) {
                             0 -> MonitorTab(
                                 liveState = liveState,
                                 artworkBitmap = artworkBitmap,
@@ -312,6 +340,7 @@ fun ClawdBridgeMainApp() {
                                 isSimulatorActive = isSimulatorActive,
                                 isSimulatorPlaying = isSimulatorPlaying,
                                 onForceRebind = forceRebindAction,
+                                onOpenFullscreenPlayer = { isFullscreenPlayerOpen = true },
                                 onToggleSimulator = { enable -> TestMediaSimulator.toggleSimulator(enable) },
                                 onPlayPauseSimulator = {
                                     if (isSimulatorPlaying) TestMediaSimulator.pause() else TestMediaSimulator.play()
@@ -347,15 +376,44 @@ fun ClawdBridgeMainApp() {
                                 isBatteryOptIgnored = isBatteryOptIgnored,
                                 dynamicBackgroundEnabled = dynamicBackgroundEnabled,
                                 onToggleDynamicBackground = { MediaBridgeStateHolder.setDynamicBackgroundEnabled(it) },
+                                backgroundStyle = backgroundStyle,
+                                onBackgroundStyleChange = { MediaBridgeStateHolder.setBackgroundStyle(it) },
+                                onSliderDragChange = { isSliderDragging = it },
                                 onForceRebind = forceRebindAction
                             )
                         }
+                        Spacer(modifier = Modifier.height(6.dp))
                     }
-
-                    Spacer(modifier = Modifier.height(6.dp))
                 }
             }
         }
+
+        FullscreenPlayerOverlay(
+            isOpen = isFullscreenPlayerOpen && playerUiState.hasMedia,
+            context = context,
+            track = playerUiState,
+            artworkBitmap = artworkBitmap,
+            livingPalette = livingPalette,
+            styleConfig = playerStyleConfig,
+            lyricsState = lyricsUiState,
+            preferredLyricsProvider = preferredLyricsProvider,
+            syncOffsetMs = syncOffsetMs,
+            artworkDebugStatus = artworkDebugStatus,
+            onDismiss = { isFullscreenPlayerOpen = false },
+            onTogglePlayPause = { MediaBridgeStateHolder.togglePlayPause() },
+            onSkipNext = { MediaBridgeStateHolder.skipToNext() },
+            onSkipPrevious = { MediaBridgeStateHolder.skipToPrevious() },
+            onSeekToRawMs = { rawMs -> MediaBridgeStateHolder.seekToPosition(rawMs) },
+            onSeekByDelta = { deltaMs -> MediaBridgeStateHolder.seekByDelta(deltaMs) },
+            onSyncOffsetChange = { offset -> MediaBridgeStateHolder.setSyncOffsetMs(offset) },
+            onUpdateStyle = { transform -> MediaBridgeStateHolder.updatePlayerStyle(transform) },
+            onRefreshLyrics = { providerId ->
+                MediaBridgeStateHolder.loadLyricsForCurrentTrack(
+                    forceRefresh = true,
+                    preferredProvider = providerId
+                )
+            }
+        )
     }
 }
 

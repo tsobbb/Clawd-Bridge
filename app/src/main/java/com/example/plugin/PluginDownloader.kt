@@ -6,14 +6,12 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.content.FileProvider
+import com.example.network.BridgeHttpClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.io.FileOutputStream
-import java.net.HttpURLConnection
-import java.net.URL
 import java.net.URLDecoder
 import java.net.URLEncoder
 import java.util.Locale
@@ -316,31 +314,26 @@ object PluginDownloader {
         val refPart = if (!branch.isNullOrBlank()) "?ref=${URLEncoder.encode(branch, "UTF-8")}" else ""
         val apiUrl = "https://api.github.com/repos/$owner/$repo/contents$pathPart$refPart"
 
-        val conn = (URL(apiUrl).openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 10000
-            readTimeout = 15000
-            setRequestProperty("Accept", "application/vnd.github+json")
-            setRequestProperty("User-Agent", "ClawdBridge-Android")
-            if (token.isNotBlank()) {
-                setRequestProperty("Authorization", "Bearer $token")
-            }
+        val headers = buildMap {
+            put("Accept", "application/vnd.github+json")
+            put("User-Agent", BridgeHttpClient.GITHUB_USER_AGENT)
+            if (token.isNotBlank()) put("Authorization", "Bearer $token")
         }
-        return try {
-            val code = conn.responseCode
-            if (code !in 200..299) {
-                throw IllegalStateException("GitHub API HTTP $code")
-            }
-            val body = conn.inputStream.bufferedReader().use { it.readText() }
-            val trimmed = body.trim()
-            if (trimmed.startsWith("[")) {
-                val array = JSONArray(trimmed)
-                List(array.length()) { idx -> array.getJSONObject(idx) }
-            } else {
-                listOf(JSONObject(trimmed))
-            }
-        } finally {
-            conn.disconnect()
+        val (code, body) = BridgeHttpClient.getTextWithCode(
+            url = apiUrl,
+            useCatalogClient = false,
+            headers = headers,
+            maxRetries = 2
+        )
+        if (code !in 200..299 || body == null) {
+            throw IllegalStateException("GitHub API HTTP $code")
+        }
+        val trimmed = body.trim()
+        return if (trimmed.startsWith("[")) {
+            val array = JSONArray(trimmed)
+            List(array.length()) { idx -> array.getJSONObject(idx) }
+        } else {
+            listOf(JSONObject(trimmed))
         }
     }
 
@@ -384,44 +377,42 @@ object PluginDownloader {
         token: String
     ): List<RemotePluginFile> {
         val apiUrl = "https://api.github.com/repos/$owner/$repo/releases/latest"
-        val conn = (URL(apiUrl).openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 10000
-            readTimeout = 15000
-            setRequestProperty("Accept", "application/vnd.github+json")
-            setRequestProperty("User-Agent", "ClawdBridge-Android")
-            if (token.isNotBlank()) {
-                setRequestProperty("Authorization", "Bearer $token")
-            }
+        val headers = buildMap {
+            put("Accept", "application/vnd.github+json")
+            put("User-Agent", BridgeHttpClient.GITHUB_USER_AGENT)
+            if (token.isNotBlank()) put("Authorization", "Bearer $token")
         }
-        return try {
-            val code = conn.responseCode
-            if (code !in 200..299) return emptyList()
-            val body = conn.inputStream.bufferedReader().use { it.readText() }
-            val json = JSONObject(body)
-            val assets = json.optJSONArray("assets") ?: return emptyList()
-            val result = mutableListOf<RemotePluginFile>()
-            for (i in 0 until assets.length()) {
-                val asset = assets.getJSONObject(i)
-                val name = asset.optString("name")
-                val downloadUrl = asset.optString("browser_download_url")
-                val apiAssetUrl = asset.optString("url")
-                val size = asset.optLong("size", -1L)
-                if (name.isNotBlank() && downloadUrl.isNotBlank()) {
-                    result.add(
-                        RemotePluginFile(
-                            name = name,
-                            downloadUrl = downloadUrl,
-                            sizeBytes = size,
-                            apiFileUrl = apiAssetUrl.ifBlank { null }
-                        )
+        val (code, body) = runCatching {
+            BridgeHttpClient.getTextWithCode(
+                url = apiUrl,
+                useCatalogClient = false,
+                headers = headers,
+                maxRetries = 2
+            )
+        }.getOrElse { return emptyList() }
+        if (code !in 200..299 || body == null) return emptyList()
+
+        val json = JSONObject(body)
+        val assets = json.optJSONArray("assets") ?: return emptyList()
+        val result = mutableListOf<RemotePluginFile>()
+        for (i in 0 until assets.length()) {
+            val asset = assets.getJSONObject(i)
+            val name = asset.optString("name")
+            val downloadUrl = asset.optString("browser_download_url")
+            val apiAssetUrl = asset.optString("url")
+            val size = asset.optLong("size", -1L)
+            if (name.isNotBlank() && downloadUrl.isNotBlank()) {
+                result.add(
+                    RemotePluginFile(
+                        name = name,
+                        downloadUrl = downloadUrl,
+                        sizeBytes = size,
+                        apiFileUrl = apiAssetUrl.ifBlank { null }
                     )
-                }
+                )
             }
-            result
-        } finally {
-            conn.disconnect()
         }
+        return result
     }
 
     private fun fetchViaHtmlFallback(
@@ -431,45 +422,38 @@ object PluginDownloader {
         branch: String,
         path: String
     ): List<RemotePluginFile> {
-        val conn = (URL(webUrl).openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 10000
-            readTimeout = 15000
-            instanceFollowRedirects = true
-            setRequestProperty("User-Agent", "Mozilla/5.0 (Android) ClawdBridge")
+        val (code, html) = BridgeHttpClient.getTextWithCode(
+            url = webUrl,
+            useCatalogClient = false,
+            headers = mapOf("User-Agent" to BridgeHttpClient.BROWSER_USER_AGENT),
+            maxRetries = 2
+        )
+        if (code !in 200..299 || html == null) {
+            throw IllegalStateException("GitHub HTTP $code")
         }
-        return try {
-            val code = conn.responseCode
-            if (code !in 200..299) {
-                throw IllegalStateException("GitHub HTTP $code")
-            }
-            val html = conn.inputStream.bufferedReader().use { it.readText() }
-            val escapedPrefix = Regex.escape("/$owner/$repo/blob/$branch/") +
-                if (path.isNotEmpty()) Regex.escape("$path/") else ""
-            val regex = Regex("""$escapedPrefix([^"\\?#<>\s]+)""")
-            val seen = LinkedHashSet<String>()
-            val result = mutableListOf<RemotePluginFile>()
-            val rawPrefix = if (path.isNotEmpty()) "$path/" else ""
-            for (match in regex.findAll(html)) {
-                val encodedSegment = match.groupValues[1]
-                val decodedName = runCatching {
-                    URLDecoder.decode(encodedSegment, "UTF-8")
-                }.getOrDefault(encodedSegment)
-                if (decodedName.isNotBlank() && !decodedName.contains('/') && seen.add(decodedName)) {
-                    val encodedPath = URLEncoder.encode(decodedName, "UTF-8").replace("+", "%20")
-                    result.add(
-                        RemotePluginFile(
-                            name = decodedName,
-                            downloadUrl = "https://raw.githubusercontent.com/$owner/$repo/$branch/$rawPrefix$encodedPath",
-                            sizeBytes = -1L
-                        )
+        val escapedPrefix = Regex.escape("/$owner/$repo/blob/$branch/") +
+            if (path.isNotEmpty()) Regex.escape("$path/") else ""
+        val regex = Regex("""$escapedPrefix([^"\\?#<>\s]+)""")
+        val seen = LinkedHashSet<String>()
+        val result = mutableListOf<RemotePluginFile>()
+        val rawPrefix = if (path.isNotEmpty()) "$path/" else ""
+        for (match in regex.findAll(html)) {
+            val encodedSegment = match.groupValues[1]
+            val decodedName = runCatching {
+                URLDecoder.decode(encodedSegment, "UTF-8")
+            }.getOrDefault(encodedSegment)
+            if (decodedName.isNotBlank() && !decodedName.contains('/') && seen.add(decodedName)) {
+                val encodedPath = URLEncoder.encode(decodedName, "UTF-8").replace("+", "%20")
+                result.add(
+                    RemotePluginFile(
+                        name = decodedName,
+                        downloadUrl = "https://raw.githubusercontent.com/$owner/$repo/$branch/$rawPrefix$encodedPath",
+                        sizeBytes = -1L
                     )
-                }
+                )
             }
-            result
-        } finally {
-            conn.disconnect()
         }
+        return result
     }
 
     internal fun sortAndFilterPlugins(files: List<RemotePluginFile>): List<RemotePluginFile> {
@@ -534,64 +518,34 @@ object PluginDownloader {
         val token = githubToken.trim()
         val useApiRaw = token.isNotEmpty() && !remoteFile.apiFileUrl.isNullOrBlank()
         val requestUrl = if (useApiRaw) remoteFile.apiFileUrl!! else remoteFile.downloadUrl
+        val headers = buildMap {
+            put("User-Agent", BridgeHttpClient.GITHUB_USER_AGENT)
+            if (useApiRaw) put("Accept", "application/vnd.github.raw")
+            if (token.isNotEmpty()) put("Authorization", "Bearer $token")
+        }
 
-        val conn = (URL(requestUrl).openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 10000
-            readTimeout = 20000
-            instanceFollowRedirects = true
-            setRequestProperty("User-Agent", "ClawdBridge-Android")
-            if (useApiRaw) {
-                setRequestProperty("Accept", "application/vnd.github.raw")
-            }
-            if (token.isNotEmpty()) {
-                setRequestProperty("Authorization", "Bearer $token")
+        BridgeHttpClient.downloadFile(
+            url = requestUrl,
+            partFile = tempFile,
+            expectedSizeBytes = remoteFile.sizeBytes,
+            headers = headers,
+            maxRetries = 2
+        ) { downloadedBytes, totalBytes ->
+            if (totalBytes > 0) {
+                onProgress((downloadedBytes.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f))
+            } else {
+                onProgress(null)
             }
         }
 
-        try {
-            val code = conn.responseCode
-            if (code !in 200..299) {
-                throw IllegalStateException("Ошибка загрузки HTTP $code")
-            }
-
-            val totalBytes = conn.contentLengthLong.takeIf { it > 0 } ?: remoteFile.sizeBytes
-            var downloadedBytes = 0L
-
-            conn.inputStream.use { input ->
-                FileOutputStream(tempFile, false).use { output ->
-                    val buffer = ByteArray(8192)
-                    while (true) {
-                        val read = input.read(buffer)
-                        if (read == -1) break
-                        output.write(buffer, 0, read)
-                        downloadedBytes += read
-                        if (totalBytes > 0) {
-                            onProgress((downloadedBytes.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f))
-                        } else {
-                            onProgress(null)
-                        }
-                    }
-                    output.flush()
-                }
-            }
-
-            if (downloadedBytes <= 0L) {
-                tempFile.delete()
-                throw IllegalStateException("Скачанный файл пуст")
-            }
-
-            if (targetFile.exists()) {
-                targetFile.delete()
-            }
-            if (!tempFile.renameTo(targetFile)) {
-                tempFile.copyTo(targetFile, overwrite = true)
-                tempFile.delete()
-            }
-            targetFile
-        } finally {
-            conn.disconnect()
+        if (targetFile.exists()) {
+            targetFile.delete()
         }
+        if (!tempFile.renameTo(targetFile)) {
+            tempFile.copyTo(targetFile, overwrite = true)
+            tempFile.delete()
+        }
+        targetFile
     }
 
     fun getCachedPluginFile(context: Context): File? {

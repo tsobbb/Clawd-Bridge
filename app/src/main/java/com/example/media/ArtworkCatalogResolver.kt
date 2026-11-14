@@ -347,17 +347,17 @@ object ArtworkCatalogResolver {
             """recording:"${spec.title}""""
         }
         val encoded = URLEncoder.encode(query, "UTF-8")
-        var conn: HttpURLConnection? = null
         return try {
-            conn = (URL("https://musicbrainz.org/ws/2/recording/?query=$encoded&fmt=json&limit=2").openConnection() as HttpURLConnection).apply {
-                connectTimeout = 3500
-                readTimeout = 3500
-                requestMethod = "GET"
-                setRequestProperty("User-Agent", "ClawdBridge/2.1 (https://github.com/tsobbb/Clawd-plugin)")
-                setRequestProperty("Accept", "application/json")
-            }
-            if (conn.responseCode !in 200..299) return null
-            val json = conn.inputStream?.bufferedReader()?.use { it.readText() } ?: return null
+            val (code, json) = com.example.network.BridgeHttpClient.getTextWithCode(
+                url = "https://musicbrainz.org/ws/2/recording/?query=$encoded&fmt=json&limit=2",
+                useCatalogClient = true,
+                headers = mapOf(
+                    "User-Agent" to "ClawdBridge/3.0 (https://github.com/tsobbb/Clawd-plugin)",
+                    "Accept" to "application/json"
+                ),
+                maxRetries = 1
+            )
+            if (code !in 200..299 || json == null) return null
             val recordings = JSONObject(json).optJSONArray("recordings") ?: return null
             for (i in 0 until recordings.length()) {
                 val rec = recordings.optJSONObject(i) ?: continue
@@ -373,8 +373,6 @@ object ArtworkCatalogResolver {
             null
         } catch (_: Throwable) {
             null
-        } finally {
-            conn?.disconnect()
         }
     }
 

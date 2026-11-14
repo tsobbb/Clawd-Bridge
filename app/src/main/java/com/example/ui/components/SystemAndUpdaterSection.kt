@@ -14,6 +14,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,6 +26,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -41,6 +43,8 @@ import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -67,6 +71,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.BuildConfig
+import com.example.state.BackgroundStyle
 import com.example.ui.theme.CardSurfaceDense
 import com.example.ui.theme.HairlineDivider
 import com.example.ui.theme.JetBrainsMonoFontFamily
@@ -235,6 +240,8 @@ fun SystemAndServiceSection(
     isBatteryOptIgnored: Boolean,
     dynamicBackgroundEnabled: Boolean,
     onToggleDynamicBackground: (Boolean) -> Unit,
+    backgroundStyle: BackgroundStyle,
+    onBackgroundStyleChange: (BackgroundStyle) -> Unit,
     onForceRebind: () -> Unit
 ) {
     val haptic = LocalHapticFeedback.current
@@ -344,14 +351,73 @@ fun SystemAndServiceSection(
                     modifier = Modifier.padding(horizontal = 18.dp)
                 )
 
-                // 3. Dynamic Background Toggle ("Динамический фон")
+                // 3. Background Style Selector (5 styles) + Motion Toggle
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 12.dp, bottom = 4.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "Стиль фона",
+                        style = MaterialTheme.typography.labelMedium.copy(
+                            color = TextMuted,
+                            fontWeight = FontWeight.Medium
+                        ),
+                        modifier = Modifier.padding(horizontal = 18.dp)
+                    )
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(horizontal = 18.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        BackgroundStyle.entries.forEach { styleOption ->
+                            val selected = backgroundStyle == styleOption
+                            FilterChip(
+                                selected = selected,
+                                onClick = {
+                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    onBackgroundStyleChange(styleOption)
+                                },
+                                label = {
+                                    Text(
+                                        text = styleOption.label,
+                                        style = MaterialTheme.typography.labelMedium.copy(
+                                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium
+                                        )
+                                    )
+                                },
+                                shape = RoundedCornerShape(999.dp),
+                                colors = FilterChipDefaults.filterChipColors(
+                                    containerColor = NestedSurface,
+                                    labelColor = TextSecondary,
+                                    selectedContainerColor = MintCta.copy(alpha = 0.18f),
+                                    selectedLabelColor = MintCta
+                                ),
+                                border = FilterChipDefaults.filterChipBorder(
+                                    enabled = true,
+                                    selected = selected,
+                                    borderColor = SpecularStroke,
+                                    selectedBorderColor = MintCta.copy(alpha = 0.42f)
+                                ),
+                                modifier = Modifier.testTag("bg_style_chip_${styleOption.id}")
+                            )
+                        }
+                    }
+                }
+
+                // 4. Dynamic Background Motion Toggle ("Динамический фон")
                 SystemSettingRow(
                     icon = Icons.Default.AutoAwesome,
-                    title = "Динамический фон",
-                    subtitle = if (dynamicBackgroundEnabled) {
-                        "Плавное движение цветового фона"
-                    } else {
-                        "Статичный фоновый градиент (экономия)"
+                    title = "Движение фона",
+                    subtitle = when {
+                        backgroundStyle == BackgroundStyle.PURE_BLACK -> "Отключено в режиме «Чистый чёрный»"
+                        dynamicBackgroundEnabled -> "Плавное перетекание цветового фона"
+                        else -> "Статичный фоновый градиент (экономия)"
                     },
                     onClick = { onToggleDynamicBackground(!dynamicBackgroundEnabled) },
                     modifier = Modifier.testTag("dynamic_background_row"),

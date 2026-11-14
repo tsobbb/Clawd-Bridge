@@ -433,7 +433,121 @@ class ExampleUnitTest {
         val result = com.example.media.SmartColorExtractor.extractFromPixels(pixels, 32, 32)
         assertTrue("Pale cream + black ink cover must avoid muddy brown saturation", result.isMonochrome)
     }
+
+    @Test
+    fun `verify SmartColorExtractor produces 6-color extended palette preserving rare accent and 3x3 spatial grid`() {
+        // Build a 32x32 image: mostly dark/crimson, with a vivid cyan block in bottom-right zone (gx=2, gy=2)
+        val pixels = IntArray(32 * 32) { idx ->
+            val x = idx % 32
+            val y = idx / 32
+            when {
+                x >= 24 && y >= 24 -> 0xFF00E5FF.toInt() // vivid cyan patch (~6% of image)
+                y < 12 -> 0xFFB91C1C.toInt()              // crimson top band
+                else -> 0xFF0B0D12.toInt()                // deep obsidian base
+            }
+        }
+        val result = com.example.media.SmartColorExtractor.extractFromPixels(pixels, 32, 32)
+        assertFalse(result.isMonochrome)
+        assertEquals(6, result.paletteExtendedRgb.size)
+        assertEquals(9, result.spatialGrid3x3Rgb.size)
+
+        // Ensure cyan hue (~175..205 deg) survived in paletteExtendedRgb AND bottom-right grid cell (index 8) is bluish/cyan
+        val hasCyanExtended = result.paletteExtendedRgb.any { rgb ->
+            val hsl = com.example.media.SmartColorExtractor.rgbToHsl(rgb)
+            hsl.s > 0.35f && hsl.h in 160f..215f
+        }
+        assertTrue("Extended 6-color palette must preserve contrasting cyan accent", hasCyanExtended)
+
+        val bottomRightCell = result.spatialGrid3x3Rgb[8]
+        val b = bottomRightCell and 0xFF
+        val r = (bottomRightCell shr 16) and 0xFF
+        assertTrue("Bottom-right 3x3 zone must reflect cyan/blue region over red (b=$b, r=$r)", b > r)
+    }
+
+    @Test
+    fun `verify Ipv4FirstDns sorts IPv4 ahead of IPv6 cleanly`() {
+        val ipv6a = java.net.InetAddress.getByAddress(
+            byteArrayOf(0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1)
+        )
+        val ipv4a = java.net.InetAddress.getByAddress(byteArrayOf(104, 16, 1, 1))
+        val ipv6b = java.net.InetAddress.getByAddress(
+            byteArrayOf(0x20, 0x01, 0x48, 0x60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x88.toByte(), 0x88.toByte())
+        )
+        val ipv4b = java.net.InetAddress.getByAddress(byteArrayOf(1, 1, 1, 1))
+
+        val sorted = com.example.network.Ipv4FirstDns.sortAddressesIpv4First(
+            listOf(ipv6a, ipv4a, ipv6b, ipv4b)
+        )
+        assertEquals(4, sorted.size)
+        assertTrue(sorted[0] is java.net.Inet4Address)
+        assertTrue(sorted[1] is java.net.Inet4Address)
+        assertTrue(sorted[2] is java.net.Inet6Address)
+        assertTrue(sorted[3] is java.net.Inet6Address)
+        assertEquals(ipv4a, sorted[0])
+        assertEquals(ipv4b, sorted[1])
+    }
+
+    @Test
+    fun `verify BackgroundStyle enum and 6-color and 3x3 LivingThemeEngine palettes`() {
+        assertEquals(5, com.example.state.BackgroundStyle.entries.size)
+        assertEquals(
+            com.example.state.BackgroundStyle.PURE_BLACK,
+            com.example.state.BackgroundStyle.fromId("pure_black")
+        )
+        assertEquals(
+            com.example.state.BackgroundStyle.LIQUID_SILK,
+            com.example.state.BackgroundStyle.fromId("unknown_style")
+        )
+
+        val ext = com.example.ui.theme.computeExtendedSixPalette(
+            isTrackActive = true,
+            accentColorHex = "#EF4444",
+            accentColorsHex = listOf("#EF4444", "#06B6D4", "#111827"),
+            extendedColorsHex = listOf("#EF4444", "#06B6D4", "#8B5CF6", "#111827", "#FDE047", "#38BDF8")
+        )
+        assertEquals(6, ext.size)
+
+        val grid = com.example.ui.theme.computeGridNinePalette(
+            isTrackActive = true,
+            gridColorsHex = List(9) { "#3B82F6" },
+            extendedFallback = ext
+        )
+        assertEquals(9, grid.size)
+    }
+
+    @Test
+    fun `verify findActiveLyricsLineIndex and computeCompensatedSeekTargetMs`() {
+        val lines = listOf(
+            com.example.lyrics.LyricsLine(4_000L, "Line 1"),
+            com.example.lyrics.LyricsLine(10_500L, "Line 2"),
+            com.example.lyrics.LyricsLine(18_200L, "Line 3"),
+            com.example.lyrics.LyricsLine(25_000L, "Line 4")
+        )
+        assertEquals(-1, com.example.ui.components.findActiveLyricsLineIndex(lines, 1_500L))
+        assertEquals(0, com.example.ui.components.findActiveLyricsLineIndex(lines, 4_000L))
+        assertEquals(0, com.example.ui.components.findActiveLyricsLineIndex(lines, 9_999L))
+        assertEquals(1, com.example.ui.components.findActiveLyricsLineIndex(lines, 10_500L))
+        assertEquals(2, com.example.ui.components.findActiveLyricsLineIndex(lines, 20_000L))
+        assertEquals(3, com.example.ui.components.findActiveLyricsLineIndex(lines, 99_000L))
+        assertEquals(-1, com.example.ui.components.findActiveLyricsLineIndex(emptyList(), 5_000L))
+
+        // Compensating positive Bluetooth offset (+300 ms): line at 10500 display ms seeks raw player to 10200 ms
+        assertEquals(
+            10_200L,
+            com.example.ui.components.computeCompensatedSeekTargetMs(10_500L, 180_000L, 300)
+        )
+        // Clamped within [0, durationMs]
+        assertEquals(
+            0L,
+            com.example.ui.components.computeCompensatedSeekTargetMs(200L, 180_000L, 500)
+        )
+        assertEquals(
+            180_000L,
+            com.example.ui.components.computeCompensatedSeekTargetMs(179_800L, 180_000L, -500)
+        )
+    }
 }
+
 
 
 
