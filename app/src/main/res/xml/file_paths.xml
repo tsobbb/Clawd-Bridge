@@ -3,4 +3,7 @@
     <cache-path
         name="cached_plugins"
         path="plugins/" />
+    <cache-path
+        name="apk_updates"
+        path="updates/" />
 </paths>

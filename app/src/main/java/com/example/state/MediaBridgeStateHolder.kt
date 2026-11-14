@@ -110,11 +110,15 @@ object MediaBridgeStateHolder {
 
     private const val PREFS_SYNC_NAME = "clawd_bridge_sync_prefs"
     private const val KEY_SYNC_OFFSET_MS = "sync_offset_ms"
+    private const val KEY_DYNAMIC_BACKGROUND_ENABLED = "dynamic_background_enabled"
     const val MIN_SYNC_OFFSET_MS = -2000
     const val MAX_SYNC_OFFSET_MS = 2000
 
     private val _syncOffsetMs = MutableStateFlow(0)
     val syncOffsetMs: StateFlow<Int> = _syncOffsetMs.asStateFlow()
+
+    private val _dynamicBackgroundEnabled = MutableStateFlow(true)
+    val dynamicBackgroundEnabled: StateFlow<Boolean> = _dynamicBackgroundEnabled.asStateFlow()
 
     private val requestCounter = AtomicLong(0L)
     private val lastPushedSignature = AtomicReference<String>("")
@@ -126,7 +130,16 @@ object MediaBridgeStateHolder {
             val sp = ctx.getSharedPreferences(PREFS_SYNC_NAME, Context.MODE_PRIVATE)
             _syncOffsetMs.value = sp.getInt(KEY_SYNC_OFFSET_MS, 0)
                 .coerceIn(MIN_SYNC_OFFSET_MS, MAX_SYNC_OFFSET_MS)
+            _dynamicBackgroundEnabled.value = sp.getBoolean(KEY_DYNAMIC_BACKGROUND_ENABLED, true)
         }
+    }
+
+    fun setDynamicBackgroundEnabled(enabled: Boolean) {
+        _dynamicBackgroundEnabled.value = enabled
+        appContext?.getSharedPreferences(PREFS_SYNC_NAME, Context.MODE_PRIVATE)
+            ?.edit()
+            ?.putBoolean(KEY_DYNAMIC_BACKGROUND_ENABLED, enabled)
+            ?.apply()
     }
 
     fun setSyncOffsetMs(offsetMs: Int) {

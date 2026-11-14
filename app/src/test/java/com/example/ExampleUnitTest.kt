@@ -239,4 +239,47 @@ class ExampleUnitTest {
         assertEquals("Lean Wit Me", params["title"])
         assertTrue(LocalHttpServer.parseQueryParams("").isEmpty())
     }
+
+    @Test
+    fun `verify ContrastGuard normalizes dark burgundy into legible PlayerAccent and soft blobs`() {
+        val darkBurgundy = com.example.ui.theme.ContrastGuard.parseHexRgb("#3A0A14", 0x38BDF8)
+        val playerRgb = com.example.ui.theme.ContrastGuard.normalizePlayerAccentRgb(darkBurgundy)
+        val playerHsl = com.example.ui.theme.ContrastGuard.rgbToHsl(playerRgb)
+        assertTrue("PlayerAccent Lightness must be >= 0.70 for WCAG legibility", playerHsl.l >= 0.70f)
+        assertTrue("PlayerAccent Lightness must be <= 0.86", playerHsl.l <= 0.86f)
+
+        val blobRgb = com.example.ui.theme.ContrastGuard.normalizeAmbientBlobRgb(darkBurgundy)
+        val blobHsl = com.example.ui.theme.ContrastGuard.rgbToHsl(blobRgb)
+        assertTrue("AmbientBlob Lightness must stay in 0.24..0.43", blobHsl.l in 0.24f..0.43f)
+
+        val cardTintRgb = com.example.ui.theme.ContrastGuard.normalizeCardTintRgb(darkBurgundy)
+        val cardHsl = com.example.ui.theme.ContrastGuard.rgbToHsl(cardTintRgb)
+        assertTrue("CardTint Lightness must stay in 0.08..0.14", cardHsl.l in 0.08f..0.14f)
+    }
+
+    @Test
+    fun `verify BridgeAppUpdater semver, versionJson, and app build gradle parsing`() {
+        assertTrue(com.example.updater.BridgeAppUpdater.compareSemver("v2.2.1", "2.2.0") > 0)
+        assertTrue(com.example.updater.BridgeAppUpdater.compareSemver("2.3.0", "2.2.9") > 0)
+        assertEquals(0, com.example.updater.BridgeAppUpdater.compareSemver("v2.2.0", "2.2.0"))
+        assertTrue(com.example.updater.BridgeAppUpdater.compareSemver("2.1.5", "2.2.0") < 0)
+
+        val jsonParsed = com.example.updater.BridgeAppUpdater.parseVersionJson(
+            """{"versionCode": 5, "versionName": "2.4.0", "apkName": "ClawdBridge.apk"}"""
+        )
+        assertEquals(5, jsonParsed?.versionCode)
+        assertEquals("2.4.0", jsonParsed?.versionName)
+        assertEquals("ClawdBridge.apk", jsonParsed?.apkName)
+
+        val gradleSample = """
+            defaultConfig {
+                applicationId = "com.aistudio.clawdbridge.msrv"
+                versionCode = 7
+                versionName = "2.5.1"
+            }
+        """.trimIndent()
+        val gradleParsed = com.example.updater.BridgeAppUpdater.parseGradleVersionInfo(gradleSample)
+        assertEquals(7, gradleParsed?.versionCode)
+        assertEquals("2.5.1", gradleParsed?.versionName)
+    }
 }

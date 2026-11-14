@@ -3,13 +3,18 @@ package com.example.ui.components
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import android.content.Intent
-import android.net.Uri
-import android.provider.Settings
+import android.graphics.Bitmap
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -17,93 +22,123 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Album
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.FilterAlt
 import androidx.compose.material.icons.filled.Http
-import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Lyrics
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Storage
-import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Timer
-import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.BottomSheetDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.example.filter.AppFilterManager
 import com.example.filter.DiscoveredMediaApp
-import com.example.ui.theme.CoralRed
-import com.example.ui.theme.DarkBackground
-import com.example.ui.theme.DarkSurface
-import com.example.ui.theme.DarkSurfaceHighlight
-import com.example.ui.theme.ElectricCyan
-import com.example.ui.theme.ElectricViolet
+import com.example.ui.theme.CardSurfaceDense
+import com.example.ui.theme.HairlineDivider
 import com.example.ui.theme.JetBrainsMonoFontFamily
-import androidx.compose.material.icons.filled.Lyrics
-import androidx.compose.ui.graphics.luminance
 import com.example.ui.theme.LivingPaletteState
-import com.example.ui.theme.NeonEmerald
+import com.example.ui.theme.MintCta
+import com.example.ui.theme.MintCtaContent
+import com.example.ui.theme.NestedSurface
+import com.example.ui.theme.SecondaryGlass
+import com.example.ui.theme.SecondaryGlassText
+import com.example.ui.theme.SemanticCoral
+import com.example.ui.theme.SemanticEmerald
+import com.example.ui.theme.SheetSurface
+import com.example.ui.theme.SpecularStroke
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
-import com.example.ui.theme.rotatingBorderBrush
+import com.example.ui.theme.withTabularNumbers
+import com.example.util.AppMetadataResolver
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import kotlin.math.roundToInt
 
 data class TestApiResult(
     val isSuccess: Boolean,
+    val endpoint: String,
     val headerTitle: String,
+    val latencyMs: Long,
     val content: String
 )
 
+private data class EndpointSpec(
+    val methodTag: String,
+    val path: String,
+    val fullUrl: String
+)
+
+private val LOCAL_ENDPOINTS = listOf(
+    EndpointSpec("GET", "/now-playing", "http://127.0.0.1:44444/now-playing"),
+    EndpointSpec("SSE", "/events", "http://127.0.0.1:44444/events"),
+    EndpointSpec("IMG", "/artwork", "http://127.0.0.1:44444/artwork"),
+    EndpointSpec("TXT", "/lyrics", "http://127.0.0.1:44444/lyrics")
+)
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DiagnosticsTab(
     context: Context,
     livingPalette: LivingPaletteState,
+    artworkBitmap: Bitmap?,
     isServerRunning: Boolean,
     requestCount: Long,
     activeSseClients: Int,
@@ -120,10 +155,13 @@ fun DiagnosticsTab(
     backupStatus: String,
     isNotificationAccessGranted: Boolean,
     isBatteryOptIgnored: Boolean,
+    dynamicBackgroundEnabled: Boolean,
+    onToggleDynamicBackground: (Boolean) -> Unit,
     onForceRebind: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val coroutineScope = rememberCoroutineScope()
+    val haptic = LocalHapticFeedback.current
     var apiTestResult by remember { mutableStateOf<TestApiResult?>(null) }
     var isTestingApi by remember { mutableStateOf(false) }
 
@@ -131,24 +169,23 @@ fun DiagnosticsTab(
         modifier = modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // 1. HTTP + SSE Diagnostics Card
         HttpServerDiagnosticsCard(
             livingPalette = livingPalette,
+            artworkBitmap = artworkBitmap,
             isServerRunning = isServerRunning,
             requestCount = requestCount,
             activeSseClients = activeSseClients,
-            lastRequestTimestamp = lastRequestTimestamp,
             artworkDebugStatus = artworkDebugStatus,
             onCopyUrl = { urlToCopy ->
                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                val clip = ClipData.newPlainText("Clawd Bridge API", urlToCopy)
-                clipboard.setPrimaryClip(clip)
-                Toast.makeText(context, "URL скопирован: $urlToCopy", Toast.LENGTH_SHORT).show()
+                clipboard.setPrimaryClip(ClipData.newPlainText("Clawd Bridge API", urlToCopy))
+                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                Toast.makeText(context, "Скопировано: $urlToCopy", Toast.LENGTH_SHORT).show()
             },
             onTestNowPlaying = {
                 coroutineScope.launch {
                     isTestingApi = true
-                    apiTestResult = testLocalEndpoint("http://127.0.0.1:44444/now-playing", timeoutMs = 1500)
+                    apiTestResult = testLocalEndpoint("http://127.0.0.1:44444/now-playing", "/now-playing", 1500)
                     isTestingApi = false
                 }
             },
@@ -162,90 +199,165 @@ fun DiagnosticsTab(
             onTestLyrics = {
                 coroutineScope.launch {
                     isTestingApi = true
-                    apiTestResult = testLocalEndpoint("http://127.0.0.1:44444/lyrics", timeoutMs = 6000)
+                    apiTestResult = testLocalEndpoint("http://127.0.0.1:44444/lyrics", "/lyrics", 6000)
                     isTestingApi = false
                 }
             },
-            apiTestResult = apiTestResult,
             isTestingApi = isTestingApi
         )
 
-        // 2. Global Sync Calibration Card
         SyncOffsetCard(
-            livingPalette = livingPalette,
             syncOffsetMs = syncOffsetMs,
             onSyncOffsetChange = onSyncOffsetChange
         )
 
-        // 3. App Filter Card (Blacklist — disabled & empty by default)
         AppFilterCard(
-            livingPalette = livingPalette,
             isFilterEnabled = isFilterEnabled,
             ignoredPackages = ignoredPackages,
             discoveredApps = discoveredApps,
-            onToggleFilter = { enabled -> AppFilterManager.setFilterEnabled(enabled) },
-            onAddPackage = { pkg -> AppFilterManager.addPackage(pkg) },
-            onRemovePackage = { pkg -> AppFilterManager.removePackage(pkg) },
+            onToggleFilter = { AppFilterManager.setFilterEnabled(it) },
+            onAddPackage = { AppFilterManager.addPackage(it) },
+            onRemovePackage = { AppFilterManager.removePackage(it) },
             onTogglePreset = { packages, currentlySelected ->
-                if (currentlySelected) {
-                    AppFilterManager.removePackages(packages)
-                } else {
-                    AppFilterManager.addPackages(packages)
-                }
+                if (currentlySelected) AppFilterManager.removePackages(packages)
+                else AppFilterManager.addPackages(packages)
             },
             onClearAll = { AppFilterManager.clearAll() }
         )
 
-        // 4. Backup Storage Card (ТЗ 3.4)
         BackupStorageCard(
-            livingPalette = livingPalette,
+            context = context,
             targetPath = backupTargetPath,
             lastWrittenTime = backupWrittenTime,
-            fileSize = backupFileSize,
-            status = backupStatus
+            fileSize = backupFileSize
         )
 
-        // 5. Permissions & Force Rebind Card
-        PermissionsAndRebindCard(
+        SystemAndServiceSection(
             context = context,
             livingPalette = livingPalette,
             isNotificationAccessGranted = isNotificationAccessGranted,
             isBatteryOptIgnored = isBatteryOptIgnored,
+            dynamicBackgroundEnabled = dynamicBackgroundEnabled,
+            onToggleDynamicBackground = onToggleDynamicBackground,
             onForceRebind = onForceRebind
         )
+    }
+
+    // ModalBottomSheet API Response Viewer
+    apiTestResult?.let { result ->
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ModalBottomSheet(
+            onDismissRequest = { apiTestResult = null },
+            sheetState = sheetState,
+            containerColor = SheetSurface,
+            dragHandle = { BottomSheetDefaults.DragHandle(color = TextMuted.copy(alpha = 0.5f)) }
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(horizontal = 20.dp)
+                    .padding(bottom = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(
+                            text = result.endpoint,
+                            style = MaterialTheme.typography.titleLarge.copy(
+                                fontFamily = JetBrainsMonoFontFamily,
+                                color = TextPrimary
+                            )
+                        )
+                        Text(
+                            text = "${result.headerTitle} • ${result.latencyMs} мс",
+                            style = MaterialTheme.typography.labelMedium.withTabularNumbers().copy(
+                                color = if (result.isSuccess) SemanticEmerald else SemanticCoral,
+                                fontFamily = JetBrainsMonoFontFamily
+                            )
+                        )
+                    }
+
+                    IconButton(
+                        onClick = {
+                            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            cm.setPrimaryClip(ClipData.newPlainText("API Response", result.content))
+                            Toast.makeText(context, "Ответ скопирован", Toast.LENGTH_SHORT).show()
+                        },
+                        modifier = Modifier.minimumInteractiveComponentSize()
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ContentCopy,
+                            contentDescription = "Копировать ответ",
+                            tint = SecondaryGlassText
+                        )
+                    }
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = NestedSurface,
+                    border = BorderStroke(0.5.dp, SpecularStroke),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = result.content.ifBlank { "(пустой ответ)" },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(260.dp)
+                            .verticalScroll(rememberScrollState())
+                            .padding(14.dp),
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontFamily = JetBrainsMonoFontFamily,
+                            color = if (result.isSuccess) MintCta else SemanticCoral
+                        )
+                    )
+                }
+            }
+        }
     }
 }
 
 @Composable
 private fun HttpServerDiagnosticsCard(
     livingPalette: LivingPaletteState,
+    artworkBitmap: Bitmap?,
     isServerRunning: Boolean,
     requestCount: Long,
     activeSseClients: Int,
-    lastRequestTimestamp: Long,
     artworkDebugStatus: String,
     onCopyUrl: (String) -> Unit,
     onTestNowPlaying: () -> Unit,
     onTestSse: () -> Unit,
     onTestLyrics: () -> Unit,
-    apiTestResult: TestApiResult?,
     isTestingApi: Boolean
 ) {
-    val accent = livingPalette.primary
-    val accent2 = livingPalette.secondary
-    val accent3 = livingPalette.tertiary
+    var copiedPath by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(copiedPath) {
+        if (copiedPath != null) {
+            delay(1500L)
+            copiedPath = null
+        }
+    }
 
-    Card(
+    val previewBmp = remember(artworkBitmap) {
+        artworkBitmap?.takeIf { !it.isRecycled }?.asImageBitmap()
+    }
+
+    FrostedGlassCard(
         modifier = Modifier
             .fillMaxWidth()
             .testTag("http_server_diagnostics_card"),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = DarkSurface.copy(alpha = 0.82f)),
-        border = BorderStroke(1.dp, rotatingBorderBrush(livingPalette, alpha = 0.36f))
+        containerColor = CardSurfaceDense,
+        cornerRadius = 24.dp
     ) {
         Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+            modifier = Modifier.padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -259,257 +371,253 @@ private fun HttpServerDiagnosticsCard(
                     Icon(
                         imageVector = Icons.Default.Http,
                         contentDescription = null,
-                        tint = accent
+                        tint = SemanticEmerald
                     )
                     Text(
-                        text = "HTTP + SSE API",
+                        text = "Локальный сервер",
                         style = MaterialTheme.typography.titleMedium.copy(
-                            fontWeight = FontWeight.Bold,
+                            fontWeight = FontWeight.SemiBold,
                             color = TextPrimary
                         )
                     )
                 }
 
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     Surface(
-                        shape = RoundedCornerShape(6.dp),
-                        color = accent2.copy(alpha = 0.16f)
+                        shape = RoundedCornerShape(999.dp),
+                        color = NestedSurface
                     ) {
                         Text(
                             text = "SSE: $activeSseClients",
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                            style = MaterialTheme.typography.labelSmall.copy(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                            style = MaterialTheme.typography.labelSmall.withTabularNumbers().copy(
                                 fontFamily = JetBrainsMonoFontFamily,
-                                color = accent2
+                                color = SemanticEmerald
                             )
                         )
                     }
-                    Text(
-                        text = "$requestCount запр.",
-                        style = MaterialTheme.typography.labelMedium.copy(
-                            fontFamily = JetBrainsMonoFontFamily,
-                            color = accent
+                    Surface(
+                        shape = RoundedCornerShape(999.dp),
+                        color = NestedSurface
+                    ) {
+                        Text(
+                            text = "$requestCount запр.",
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                            style = MaterialTheme.typography.labelSmall.withTabularNumbers().copy(
+                                fontFamily = JetBrainsMonoFontFamily,
+                                color = TextSecondary
+                            )
                         )
+                    }
+                }
+            }
+
+            // Unified endpoint block with 0.5dp HairlineDividers
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = NestedSurface,
+                border = BorderStroke(0.5.dp, SpecularStroke),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column {
+                    LOCAL_ENDPOINTS.forEachIndexed { idx, ep ->
+                        val isCopied = copiedPath == ep.path
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    copiedPath = ep.path
+                                    onCopyUrl(ep.fullUrl)
+                                }
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = SecondaryGlass
+                            ) {
+                                Text(
+                                    text = ep.methodTag,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontFamily = JetBrainsMonoFontFamily,
+                                        color = MintCta,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                )
+                            }
+
+                            Text(
+                                text = "127.0.0.1:44444${ep.path}",
+                                style = MaterialTheme.typography.bodySmall.withTabularNumbers().copy(
+                                    fontFamily = JetBrainsMonoFontFamily,
+                                    color = TextPrimary
+                                ),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+
+                            Icon(
+                                imageVector = if (isCopied) Icons.Default.Check else Icons.Default.ContentCopy,
+                                contentDescription = "Копировать ${ep.fullUrl}",
+                                tint = if (isCopied) SemanticEmerald else TextMuted,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                        if (idx < LOCAL_ENDPOINTS.lastIndex) {
+                            HorizontalDivider(thickness = 0.5.dp, color = HairlineDivider)
+                        }
+                    }
+                }
+            }
+
+            // Artwork status & mini preview
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = NestedSurface,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(SecondaryGlass),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (previewBmp != null) {
+                            Image(
+                                bitmap = previewBmp,
+                                contentDescription = "Мини-превью обложки",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.matchParentSize()
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Default.Album,
+                                contentDescription = null,
+                                tint = TextMuted,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+
+                    Text(
+                        text = "Обложка: $artworkDebugStatus",
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontFamily = JetBrainsMonoFontFamily,
+                            color = TextSecondary
+                        ),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
                     )
                 }
             }
 
-            EndpointRow(
-                url = "http://127.0.0.1:44444/now-playing",
-                urlColor = accent,
-                onCopy = { onCopyUrl("http://127.0.0.1:44444/now-playing") }
-            )
-            EndpointRow(
-                url = "http://127.0.0.1:44444/events (SSE)",
-                urlColor = accent,
-                onCopy = { onCopyUrl("http://127.0.0.1:44444/events") }
-            )
-            EndpointRow(
-                url = "http://127.0.0.1:44444/artwork",
-                urlColor = accent,
-                onCopy = { onCopyUrl("http://127.0.0.1:44444/artwork") }
-            )
-            EndpointRow(
-                url = "http://127.0.0.1:44444/lyrics",
-                urlColor = accent2,
-                onCopy = { onCopyUrl("http://127.0.0.1:44444/lyrics") }
-            )
-
-            Text(
-                text = "Обложка: $artworkDebugStatus",
-                style = MaterialTheme.typography.bodySmall.copy(
-                    fontFamily = JetBrainsMonoFontFamily,
-                    color = TextSecondary,
-                    fontSize = 11.sp
-                )
-            )
-
+            // Unified calm frosted graphite test buttons
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Button(
+                GraphiteGlassButton(
                     onClick = onTestNowPlaying,
                     enabled = !isTestingApi && isServerRunning,
                     modifier = Modifier
                         .weight(1f)
-                        .height(48.dp)
-                        .testTag("test_api_button"),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = accent.copy(alpha = 0.2f),
-                        contentColor = accent
-                    ),
-                    shape = RoundedCornerShape(10.dp)
+                        .testTag("test_api_button")
                 ) {
                     if (isTestingApi) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(16.dp),
-                            color = accent,
-                            strokeWidth = 2.dp
+                        WaveLoadingDots(
+                            color = SecondaryGlassText,
+                            phase = livingPalette.phase,
+                            modifier = Modifier.size(width = 20.dp, height = 14.dp)
                         )
                     } else {
                         Icon(
                             imageVector = Icons.Default.Refresh,
                             contentDescription = null,
-                            modifier = Modifier.size(18.dp)
+                            modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("GET /now-playing", fontSize = 12.sp)
+                        Text(
+                            text = "GET /now-playing",
+                            style = MaterialTheme.typography.labelMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
                 }
 
-                OutlinedButton(
+                GraphiteGlassButton(
                     onClick = onTestSse,
                     enabled = !isTestingApi && isServerRunning,
                     modifier = Modifier
                         .weight(1f)
-                        .height(48.dp)
-                        .testTag("test_sse_button"),
-                    border = BorderStroke(1.dp, accent2.copy(alpha = 0.55f)),
-                    shape = RoundedCornerShape(10.dp)
+                        .testTag("test_sse_button")
                 ) {
                     Icon(
                         imageVector = Icons.Default.Bolt,
                         contentDescription = null,
-                        tint = accent2,
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(16.dp)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("Тест SSE /events", color = accent2, fontSize = 12.sp)
+                    Text(
+                        text = "Тест SSE",
+                        style = MaterialTheme.typography.labelMedium,
+                        maxLines = 1
+                    )
                 }
             }
 
-            OutlinedButton(
+            GraphiteGlassButton(
                 onClick = onTestLyrics,
                 enabled = !isTestingApi && isServerRunning,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(48.dp)
-                    .testTag("test_lyrics_button"),
-                border = BorderStroke(1.dp, accent3.copy(alpha = 0.55f)),
-                shape = RoundedCornerShape(10.dp)
+                    .testTag("test_lyrics_button")
             ) {
                 Icon(
                     imageVector = Icons.Default.Lyrics,
                     contentDescription = null,
-                    tint = accent3,
-                    modifier = Modifier.size(18.dp)
+                    modifier = Modifier.size(17.dp)
                 )
                 Spacer(modifier = Modifier.width(8.dp))
-                Text("Тест GET /lyrics (LRCLIB + NetEase + Genius)", color = accent3, fontSize = 12.sp)
-            }
-
-            AnimatedVisibility(visible = apiTestResult != null) {
-                apiTestResult?.let { result ->
-                    val borderColor = if (result.isSuccess) accent else CoralRed
-                    Surface(
-                        shape = RoundedCornerShape(10.dp),
-                        color = DarkBackground.copy(alpha = 0.85f),
-                        border = BorderStroke(1.dp, borderColor.copy(alpha = 0.45f)),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(modifier = Modifier.padding(10.dp)) {
-                            Text(
-                                text = if (result.isSuccess) {
-                                    "Ответ сервера (${result.headerTitle}):"
-                                } else {
-                                    "Ошибка: ${result.headerTitle}"
-                                },
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    color = if (result.isSuccess) TextSecondary else CoralRed,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = result.content,
-                                style = MaterialTheme.typography.bodySmall.copy(
-                                    fontFamily = JetBrainsMonoFontFamily,
-                                    color = if (result.isSuccess) accent else CoralRed,
-                                    fontSize = 11.sp
-                                )
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun EndpointRow(
-    url: String,
-    urlColor: Color = NeonEmerald,
-    onCopy: () -> Unit
-) {
-    Surface(
-        shape = RoundedCornerShape(10.dp),
-        color = DarkBackground.copy(alpha = 0.80f),
-        border = BorderStroke(1.dp, DarkSurfaceHighlight.copy(alpha = 0.7f))
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = url,
-                style = MaterialTheme.typography.bodySmall.copy(
-                    fontFamily = JetBrainsMonoFontFamily,
-                    color = urlColor,
-                    fontWeight = FontWeight.Medium
-                ),
-                modifier = Modifier.weight(1f)
-            )
-
-            IconButton(
-                onClick = onCopy,
-                modifier = Modifier.minimumInteractiveComponentSize()
-            ) {
-                Icon(
-                    imageVector = Icons.Default.ContentCopy,
-                    contentDescription = "Копировать $url",
-                    tint = TextSecondary,
-                    modifier = Modifier.size(18.dp)
+                Text(
+                    text = "Тест GET /lyrics",
+                    style = MaterialTheme.typography.labelLarge
                 )
             }
         }
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun AppFilterCard(
-    livingPalette: LivingPaletteState,
-    isFilterEnabled: Boolean,
-    ignoredPackages: Set<String>,
-    discoveredApps: List<DiscoveredMediaApp>,
-    onToggleFilter: (Boolean) -> Unit,
-    onAddPackage: (String) -> Unit,
-    onRemovePackage: (String) -> Unit,
-    onTogglePreset: (List<String>, Boolean) -> Unit,
-    onClearAll: () -> Unit
+private fun SyncOffsetCard(
+    syncOffsetMs: Int,
+    onSyncOffsetChange: (Int) -> Unit
 ) {
-    var customPackageInput by remember { mutableStateOf("") }
-    val accent = livingPalette.primary
-    val onAccent = if (accent.luminance() > 0.42f) Color.Black else Color.White
+    val haptic = LocalHapticFeedback.current
+    val formattedOffset = if (syncOffsetMs > 0) "+${syncOffsetMs} мс" else "${syncOffsetMs} мс"
 
-    Card(
+    FrostedGlassCard(
         modifier = Modifier
             .fillMaxWidth()
-            .testTag("app_filter_card"),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = DarkSurface.copy(alpha = 0.82f)),
-        border = BorderStroke(
-            1.dp,
-            rotatingBorderBrush(livingPalette, alpha = if (isFilterEnabled) 0.55f else 0.30f, angleOffsetDeg = 120f)
-        )
+            .testTag("sync_offset_card"),
+        containerColor = CardSurfaceDense,
+        cornerRadius = 24.dp
     ) {
         Column(
-            modifier = Modifier.padding(16.dp),
+            modifier = Modifier.padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Row(
@@ -523,15 +631,222 @@ private fun AppFilterCard(
                     modifier = Modifier.weight(1f)
                 ) {
                     Icon(
+                        imageVector = Icons.Default.Timer,
+                        contentDescription = null,
+                        tint = if (syncOffsetMs != 0) MintCta else TextMuted,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Column {
+                        Text(
+                            text = "Сдвиг синхронизации",
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                fontWeight = FontWeight.SemiBold,
+                                color = TextPrimary
+                            )
+                        )
+                        Text(
+                            text = "Компенсация задержки Bluetooth / плеера",
+                            style = MaterialTheme.typography.bodySmall.copy(color = TextMuted)
+                        )
+                    }
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(999.dp),
+                    color = NestedSurface
+                ) {
+                    Text(
+                        text = formattedOffset,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                        style = MaterialTheme.typography.labelMedium.withTabularNumbers().copy(
+                            fontFamily = JetBrainsMonoFontFamily,
+                            fontWeight = FontWeight.Bold,
+                            color = if (syncOffsetMs != 0) MintCta else TextPrimary
+                        )
+                    )
+                }
+            }
+
+            CenteredSyncSlider(
+                valueMs = syncOffsetMs,
+                onValueChange = { next ->
+                    if ((syncOffsetMs < 0 && next >= 0) || (syncOffsetMs > 0 && next <= 0) || (syncOffsetMs != 0 && next == 0)) {
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    }
+                    onSyncOffsetChange(next)
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(36.dp)
+            )
+
+            // Connected Button Group: -100 мс | Сброс | +100 мс
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(3.dp)
+            ) {
+                GraphiteGlassButton(
+                    onClick = { onSyncOffsetChange((syncOffsetMs - 100).coerceIn(-2000, 2000)) },
+                    shapeOverride = RoundedCornerShape(
+                        topStart = 24.dp,
+                        bottomStart = 24.dp,
+                        topEnd = 8.dp,
+                        bottomEnd = 8.dp
+                    ),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("-100 мс", style = MaterialTheme.typography.labelMedium.withTabularNumbers())
+                }
+
+                GraphiteGlassButton(
+                    onClick = {
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        onSyncOffsetChange(0)
+                    },
+                    enabled = syncOffsetMs != 0,
+                    shapeOverride = RoundedCornerShape(8.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("Сброс", style = MaterialTheme.typography.labelMedium)
+                }
+
+                GraphiteGlassButton(
+                    onClick = { onSyncOffsetChange((syncOffsetMs + 100).coerceIn(-2000, 2000)) },
+                    shapeOverride = RoundedCornerShape(
+                        topStart = 8.dp,
+                        bottomStart = 8.dp,
+                        topEnd = 24.dp,
+                        bottomEnd = 24.dp
+                    ),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("+100 мс", style = MaterialTheme.typography.labelMedium.withTabularNumbers())
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CenteredSyncSlider(
+    valueMs: Int,
+    onValueChange: (Int) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var widthPx by remember { mutableIntStateOf(1) }
+
+    fun offsetXToStep(x: Float): Int {
+        val ratio = (x / widthPx.toFloat().coerceAtLeast(1f)).coerceIn(0f, 1f)
+        val raw = -2000f + ratio * 4000f
+        return ((raw / 50f).roundToInt() * 50).coerceIn(-2000, 2000)
+    }
+
+    Canvas(
+        modifier = modifier
+            .pointerInput(Unit) {
+                detectTapGestures { pos ->
+                    widthPx = size.width
+                    onValueChange(offsetXToStep(pos.x))
+                }
+            }
+            .pointerInput(Unit) {
+                detectHorizontalDragGestures { change, _ ->
+                    change.consume()
+                    widthPx = size.width
+                    onValueChange(offsetXToStep(change.position.x))
+                }
+            }
+    ) {
+        val w = size.width
+        val cy = size.height / 2f
+        val centerX = w / 2f
+        val normalized = (valueMs + 2000f) / 4000f
+        val thumbX = (normalized * w).coerceIn(8.dp.toPx(), w - 8.dp.toPx())
+
+        // Base inactive track
+        drawLine(
+            color = Color.White.copy(alpha = 0.14f),
+            start = Offset(8.dp.toPx(), cy),
+            end = Offset(w - 8.dp.toPx(), cy),
+            strokeWidth = 4.dp.toPx(),
+            cap = StrokeCap.Round
+        )
+
+        // Center notch at 0 ms
+        drawLine(
+            color = Color.White.copy(alpha = 0.45f),
+            start = Offset(centerX, cy - 7.dp.toPx()),
+            end = Offset(centerX, cy + 7.dp.toPx()),
+            strokeWidth = 1.5.dp.toPx(),
+            cap = StrokeCap.Round
+        )
+
+        // Active segment extending outward from center 0 ms
+        if (valueMs != 0) {
+            drawLine(
+                color = MintCta,
+                start = Offset(centerX, cy),
+                end = Offset(thumbX, cy),
+                strokeWidth = 5.dp.toPx(),
+                cap = StrokeCap.Round
+            )
+        }
+
+        // Thumb capsule
+        drawCircle(
+            color = MintCta,
+            radius = 9.dp.toPx(),
+            center = Offset(thumbX, cy)
+        )
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun AppFilterCard(
+    isFilterEnabled: Boolean,
+    ignoredPackages: Set<String>,
+    discoveredApps: List<DiscoveredMediaApp>,
+    onToggleFilter: (Boolean) -> Unit,
+    onAddPackage: (String) -> Unit,
+    onRemovePackage: (String) -> Unit,
+    onTogglePreset: (List<String>, Boolean) -> Unit,
+    onClearAll: () -> Unit
+) {
+    val context = LocalContext.current
+    var customPackageInput by remember { mutableStateOf("") }
+
+    FrostedGlassCard(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("app_filter_card"),
+        containerColor = CardSurfaceDense,
+        cornerRadius = 24.dp
+    ) {
+        Column(
+            modifier = Modifier.padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(
                         imageVector = Icons.Default.FilterAlt,
                         contentDescription = null,
-                        tint = if (isFilterEnabled) accent else TextMuted
+                        tint = if (isFilterEnabled) MintCta else TextMuted
                     )
                     Column {
                         Text(
                             text = "Фильтр приложений (игнор)",
                             style = MaterialTheme.typography.titleMedium.copy(
-                                fontWeight = FontWeight.Bold,
+                                fontWeight = FontWeight.SemiBold,
                                 color = TextPrimary
                             )
                         )
@@ -541,36 +856,31 @@ private fun AppFilterCard(
                             } else {
                                 "Выключен — перехватываются все плееры"
                             },
-                            style = MaterialTheme.typography.bodySmall.copy(color = TextSecondary)
+                            style = MaterialTheme.typography.bodySmall.withTabularNumbers().copy(
+                                color = TextMuted
+                            )
                         )
                     }
                 }
 
-                Switch(
+                ExpressiveGlassSwitch(
                     checked = isFilterEnabled,
                     onCheckedChange = onToggleFilter,
-                    colors = SwitchDefaults.colors(
-                        checkedThumbColor = onAccent,
-                        checkedTrackColor = accent
-                    ),
                     modifier = Modifier.testTag("app_filter_switch")
                 )
             }
 
             AnimatedVisibility(visible = isFilterEnabled) {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text(
-                        text = "Обнаруженные источники звука (без прав QUERY_ALL_PACKAGES):",
-                        style = MaterialTheme.typography.labelSmall.copy(color = TextSecondary)
+                        text = "Обнаруженные источники звука:",
+                        style = MaterialTheme.typography.labelMedium.copy(color = TextMuted)
                     )
 
                     if (discoveredApps.isEmpty()) {
                         Text(
-                            text = "Воспроизведите любой трек или видео — приложение автоматически появится здесь для выбора в 1 тап.",
-                            style = MaterialTheme.typography.bodySmall.copy(
-                                color = TextMuted,
-                                fontSize = 11.sp
-                            )
+                            text = "Воспроизведите любой трек или видео — приложение появится здесь для выбора в 1 тап.",
+                            style = MaterialTheme.typography.bodySmall.copy(color = TextMuted)
                         )
                     } else {
                         FlowRow(
@@ -579,25 +889,44 @@ private fun AppFilterCard(
                         ) {
                             discoveredApps.forEach { app ->
                                 val isIgnored = app.packageName in ignoredPackages
+                                val resolved = remember(app.packageName, app.appLabel) {
+                                    AppMetadataResolver.resolveApp(context, app.packageName, app.appLabel)
+                                }
                                 FilterChip(
                                     selected = isIgnored,
                                     onClick = {
                                         if (isIgnored) onRemovePackage(app.packageName)
                                         else onAddPackage(app.packageName)
                                     },
+                                    leadingIcon = resolved.icon?.let { bmp ->
+                                        {
+                                            Image(
+                                                bitmap = bmp,
+                                                contentDescription = null,
+                                                modifier = Modifier
+                                                    .size(16.dp)
+                                                    .clip(RoundedCornerShape(4.dp))
+                                            )
+                                        }
+                                    },
                                     label = {
                                         Text(
-                                            text = if (app.appLabel != app.packageName) {
-                                                "${app.appLabel} (${app.packageName})"
-                                            } else {
-                                                app.packageName
-                                            },
-                                            fontSize = 11.sp
+                                            text = resolved.displayName,
+                                            style = MaterialTheme.typography.labelMedium
                                         )
                                     },
+                                    shape = RoundedCornerShape(12.dp),
                                     colors = FilterChipDefaults.filterChipColors(
-                                        selectedContainerColor = CoralRed.copy(alpha = 0.2f),
-                                        selectedLabelColor = CoralRed
+                                        containerColor = NestedSurface,
+                                        labelColor = TextSecondary,
+                                        selectedContainerColor = SemanticCoral.copy(alpha = 0.18f),
+                                        selectedLabelColor = SemanticCoral
+                                    ),
+                                    border = FilterChipDefaults.filterChipBorder(
+                                        enabled = true,
+                                        selected = isIgnored,
+                                        borderColor = SpecularStroke,
+                                        selectedBorderColor = SemanticCoral.copy(alpha = 0.35f)
                                     )
                                 )
                             }
@@ -605,8 +934,8 @@ private fun AppFilterCard(
                     }
 
                     Text(
-                        text = "Быстрые пресеты (нажмите, чтобы добавить/убрать):",
-                        style = MaterialTheme.typography.labelSmall.copy(color = TextSecondary)
+                        text = "Быстрые пресеты:",
+                        style = MaterialTheme.typography.labelMedium.copy(color = TextMuted)
                     )
 
                     FlowRow(
@@ -618,53 +947,76 @@ private fun AppFilterCard(
                             FilterChip(
                                 selected = isSelected,
                                 onClick = { onTogglePreset(preset.packages, isSelected) },
-                                label = { Text(preset.title, fontSize = 12.sp) },
+                                label = {
+                                    Text(
+                                        text = preset.title,
+                                        style = MaterialTheme.typography.labelMedium
+                                    )
+                                },
+                                shape = RoundedCornerShape(12.dp),
                                 colors = FilterChipDefaults.filterChipColors(
-                                    selectedContainerColor = ElectricCyan.copy(alpha = 0.2f),
-                                    selectedLabelColor = ElectricCyan
+                                    containerColor = NestedSurface,
+                                    labelColor = TextSecondary,
+                                    selectedContainerColor = MintCta.copy(alpha = 0.18f),
+                                    selectedLabelColor = MintCta
+                                ),
+                                border = FilterChipDefaults.filterChipBorder(
+                                    enabled = true,
+                                    selected = isSelected,
+                                    borderColor = SpecularStroke,
+                                    selectedBorderColor = MintCta.copy(alpha = 0.35f)
                                 )
                             )
                         }
                     }
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        OutlinedTextField(
-                            value = customPackageInput,
-                            onValueChange = { customPackageInput = it },
-                            label = { Text("Имя пакета (например com.example.app)", fontSize = 11.sp) },
-                            singleLine = true,
-                            textStyle = MaterialTheme.typography.bodySmall.copy(
-                                fontFamily = JetBrainsMonoFontFamily,
-                                color = TextPrimary
-                            ),
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = ElectricCyan,
-                                unfocusedBorderColor = DarkSurfaceHighlight
-                            ),
-                            modifier = Modifier.weight(1f)
-                        )
-
-                        Button(
-                            onClick = {
-                                if (customPackageInput.isNotBlank()) {
-                                    onAddPackage(customPackageInput)
-                                    customPackageInput = ""
-                                }
-                            },
-                            modifier = Modifier.height(52.dp),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = ElectricCyan,
-                                contentColor = Color.Black
-                            ),
-                            shape = RoundedCornerShape(10.dp)
-                        ) {
-                            Icon(imageVector = Icons.Default.Add, contentDescription = "Добавить пакет")
-                        }
-                    }
+                    // Capsule input with embedded circular '+' button inside right slot
+                    TextField(
+                        value = customPackageInput,
+                        onValueChange = { customPackageInput = it },
+                        placeholder = {
+                            Text(
+                                text = "Пакет (например com.example.app)",
+                                style = MaterialTheme.typography.bodySmall.copy(color = TextMuted),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        },
+                        singleLine = true,
+                        shape = RoundedCornerShape(26.dp),
+                        textStyle = MaterialTheme.typography.bodySmall.copy(
+                            fontFamily = JetBrainsMonoFontFamily,
+                            color = TextPrimary
+                        ),
+                        trailingIcon = {
+                            Box(
+                                modifier = Modifier
+                                    .padding(end = 4.dp)
+                                    .size(40.dp)
+                                    .clip(CircleShape)
+                                    .background(if (customPackageInput.isNotBlank()) MintCta else SecondaryGlass)
+                                    .clickable(enabled = customPackageInput.isNotBlank()) {
+                                        onAddPackage(customPackageInput)
+                                        customPackageInput = ""
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Add,
+                                    contentDescription = "Добавить пакет",
+                                    tint = if (customPackageInput.isNotBlank()) MintCtaContent else TextMuted,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        },
+                        colors = TextFieldDefaults.colors(
+                            focusedContainerColor = NestedSurface,
+                            unfocusedContainerColor = NestedSurface,
+                            focusedIndicatorColor = Color.Transparent,
+                            unfocusedIndicatorColor = Color.Transparent
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    )
 
                     if (ignoredPackages.isNotEmpty()) {
                         Row(
@@ -673,11 +1025,11 @@ private fun AppFilterCard(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "Активный список исключений:",
+                                text = "Список исключений:",
                                 style = MaterialTheme.typography.labelSmall.copy(color = TextMuted)
                             )
                             TextButton(onClick = onClearAll) {
-                                Text("Очистить всё", fontSize = 11.sp, color = CoralRed)
+                                Text("Очистить всё", style = MaterialTheme.typography.labelSmall, color = SemanticCoral)
                             }
                         }
 
@@ -693,7 +1045,7 @@ private fun AppFilterCard(
                                         Text(
                                             text = pkg,
                                             fontFamily = JetBrainsMonoFontFamily,
-                                            fontSize = 11.sp
+                                            style = MaterialTheme.typography.labelSmall
                                         )
                                     },
                                     trailingIcon = {
@@ -702,7 +1054,17 @@ private fun AppFilterCard(
                                             contentDescription = "Удалить $pkg",
                                             modifier = Modifier.size(14.dp)
                                         )
-                                    }
+                                    },
+                                    shape = RoundedCornerShape(10.dp),
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = NestedSurface,
+                                        selectedLabelColor = TextSecondary
+                                    ),
+                                    border = FilterChipDefaults.filterChipBorder(
+                                        enabled = true,
+                                        selected = true,
+                                        selectedBorderColor = SpecularStroke
+                                    )
                                 )
                             }
                         }
@@ -713,303 +1075,13 @@ private fun AppFilterCard(
     }
 }
 
-@Composable
-private fun SyncOffsetCard(
-    livingPalette: LivingPaletteState,
-    syncOffsetMs: Int,
-    onSyncOffsetChange: (Int) -> Unit
-) {
-    val accent = livingPalette.primary
-    val formattedOffset = if (syncOffsetMs > 0) "+${syncOffsetMs} мс" else "${syncOffsetMs} мс"
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag("sync_offset_card"),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = DarkSurface.copy(alpha = 0.82f)),
-        border = BorderStroke(
-            1.dp,
-            rotatingBorderBrush(livingPalette, alpha = if (syncOffsetMs != 0) 0.55f else 0.30f, angleOffsetDeg = 60f)
-        )
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Timer,
-                        contentDescription = null,
-                        tint = if (syncOffsetMs != 0) accent else TextSecondary
-                    )
-                    Column {
-                        Text(
-                            text = "Сдвиг синхронизации",
-                            style = MaterialTheme.typography.titleMedium.copy(
-                                fontWeight = FontWeight.Bold,
-                                color = TextPrimary
-                            )
-                        )
-                        Text(
-                            text = "Компенсация задержки Bluetooth / плеера",
-                            style = MaterialTheme.typography.bodySmall.copy(color = TextSecondary)
-                        )
-                    }
-                }
-
-                Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = if (syncOffsetMs != 0) accent.copy(alpha = 0.16f) else DarkSurfaceHighlight
-                ) {
-                    Text(
-                        text = formattedOffset,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                        style = MaterialTheme.typography.labelMedium.copy(
-                            fontFamily = JetBrainsMonoFontFamily,
-                            fontWeight = FontWeight.Bold,
-                            color = if (syncOffsetMs != 0) accent else TextPrimary
-                        )
-                    )
-                }
-            }
-
-            Slider(
-                value = syncOffsetMs.toFloat(),
-                onValueChange = { raw ->
-                    val stepped = (Math.round(raw / 50f) * 50).coerceIn(-2000, 2000)
-                    onSyncOffsetChange(stepped)
-                },
-                valueRange = -2000f..2000f,
-                colors = SliderDefaults.colors(
-                    thumbColor = accent,
-                    activeTrackColor = accent,
-                    inactiveTrackColor = DarkSurfaceHighlight
-                )
-            )
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                OutlinedButton(
-                    onClick = { onSyncOffsetChange((syncOffsetMs - 100).coerceIn(-2000, 2000)) },
-                    modifier = Modifier.height(40.dp),
-                    shape = RoundedCornerShape(10.dp)
-                ) {
-                    Text("-100 мс", fontSize = 12.sp, color = TextPrimary)
-                }
-
-                TextButton(
-                    onClick = { onSyncOffsetChange(0) },
-                    enabled = syncOffsetMs != 0
-                ) {
-                    Text("Сброс (0 мс)", fontSize = 12.sp, color = accent)
-                }
-
-                OutlinedButton(
-                    onClick = { onSyncOffsetChange((syncOffsetMs + 100).coerceIn(-2000, 2000)) },
-                    modifier = Modifier.height(40.dp),
-                    shape = RoundedCornerShape(10.dp)
-                ) {
-                    Text("+100 мс", fontSize = 12.sp, color = TextPrimary)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun BackupStorageCard(
-    livingPalette: LivingPaletteState,
-    targetPath: String,
-    lastWrittenTime: Long,
-    fileSize: Int,
-    status: String
-) {
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag("backup_storage_card"),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = DarkSurface.copy(alpha = 0.82f)),
-        border = BorderStroke(1.dp, rotatingBorderBrush(livingPalette, alpha = 0.28f, angleOffsetDeg = 210f))
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Storage,
-                    contentDescription = null,
-                    tint = TextSecondary,
-                    modifier = Modifier.size(20.dp)
-                )
-                Text(
-                    text = "Резервный файл (Троттлинг 2 сек)",
-                    style = MaterialTheme.typography.titleSmall.copy(
-                        fontWeight = FontWeight.Bold,
-                        color = TextPrimary
-                    )
-                )
-            }
-
-            Text(
-                text = targetPath,
-                style = MaterialTheme.typography.bodySmall.copy(
-                    fontFamily = JetBrainsMonoFontFamily,
-                    color = TextMuted,
-                    fontSize = 11.sp
-                )
-            )
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(
-                    text = "Размер: ${if (fileSize > 0) "$fileSize / 512 байт" else "ожидание"}",
-                    style = MaterialTheme.typography.labelSmall.copy(color = TextSecondary)
-                )
-
-                Text(
-                    text = if (lastWrittenTime > 0) {
-                        val sdf = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
-                        "Обновлено: ${sdf.format(Date(lastWrittenTime))}"
-                    } else "Не записывался",
-                    style = MaterialTheme.typography.labelSmall.copy(color = TextMuted)
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun PermissionsAndRebindCard(
-    context: Context,
-    livingPalette: LivingPaletteState,
-    isNotificationAccessGranted: Boolean,
-    isBatteryOptIgnored: Boolean,
-    onForceRebind: () -> Unit
-) {
-    val accent = livingPalette.primary
-    val accent2 = livingPalette.secondary
-
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Button(
-            onClick = {
-                context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
-            },
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(48.dp)
-                .testTag("notification_permission_button"),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = if (isNotificationAccessGranted) DarkSurface.copy(alpha = 0.82f) else NeonEmerald,
-                contentColor = if (isNotificationAccessGranted) accent else Color.Black
-            ),
-            border = if (isNotificationAccessGranted) {
-                BorderStroke(1.dp, accent.copy(alpha = 0.45f))
-            } else null,
-            shape = RoundedCornerShape(12.dp)
-        ) {
-            Icon(
-                imageVector = Icons.Default.Notifications,
-                contentDescription = null,
-                modifier = Modifier.size(20.dp)
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                text = if (isNotificationAccessGranted) {
-                    "Доступ к уведомлениям включен ✓"
-                } else {
-                    "Включить доступ к уведомлениям"
-                },
-                fontWeight = FontWeight.SemiBold
-            )
-        }
-
-        OutlinedButton(
-            onClick = {
-                try {
-                    val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                        data = Uri.parse("package:${context.packageName}")
-                    }
-                    context.startActivity(intent)
-                } catch (_: Exception) {
-                    context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
-                }
-            },
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(48.dp)
-                .testTag("battery_optimization_button"),
-            colors = ButtonDefaults.outlinedButtonColors(
-                contentColor = if (isBatteryOptIgnored) NeonEmerald else accent2
-            ),
-            border = BorderStroke(
-                1.dp,
-                if (isBatteryOptIgnored) NeonEmerald.copy(alpha = 0.5f) else accent2.copy(alpha = 0.5f)
-            ),
-            shape = RoundedCornerShape(12.dp)
-        ) {
-            Icon(
-                imageVector = Icons.Default.Tune,
-                contentDescription = null,
-                modifier = Modifier.size(20.dp)
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                text = if (isBatteryOptIgnored) {
-                    "Оптимизация батареи отключена ✓"
-                } else {
-                    "Отключить оптимизацию батареи"
-                },
-                fontWeight = FontWeight.Medium
-            )
-        }
-
-        if (isNotificationAccessGranted) {
-            OutlinedButton(
-                onClick = onForceRebind,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(48.dp)
-                    .testTag("force_rebind_button"),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = accent2),
-                border = BorderStroke(1.dp, accent2.copy(alpha = 0.5f)),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Sync,
-                    contentDescription = null,
-                    modifier = Modifier.size(20.dp),
-                    tint = accent2
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = "Сбросить и переподключить службу",
-                    fontWeight = FontWeight.Medium
-                )
-            }
-        }
-    }
-}
-
-private suspend fun testLocalEndpoint(targetUrl: String, timeoutMs: Int = 1500): TestApiResult = withContext(Dispatchers.IO) {
+private suspend fun testLocalEndpoint(
+    targetUrl: String,
+    endpointPath: String,
+    timeoutMs: Int = 1500
+): TestApiResult = withContext(Dispatchers.IO) {
     var conn: HttpURLConnection? = null
+    val startNs = System.nanoTime()
     try {
         val url = URL(targetUrl)
         conn = (url.openConnection() as HttpURLConnection).apply {
@@ -1020,16 +1092,23 @@ private suspend fun testLocalEndpoint(targetUrl: String, timeoutMs: Int = 1500):
         val code = conn.responseCode
         val msg = conn.responseMessage ?: ""
         val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-        val text = stream?.bufferedReader()?.use { it.readText() } ?: ""
+        val raw = stream?.bufferedReader()?.use { it.readText() } ?: ""
+        val elapsedMs = (System.nanoTime() - startNs) / 1_000_000L
+        val pretty = formatJsonIfPossible(raw)
         TestApiResult(
             isSuccess = (code in 200..299),
-            headerTitle = "HTTP $code $msg",
-            content = text
+            endpoint = endpointPath,
+            headerTitle = "HTTP $code $msg".trim(),
+            latencyMs = elapsedMs,
+            content = pretty
         )
     } catch (e: Exception) {
+        val elapsedMs = (System.nanoTime() - startNs) / 1_000_000L
         TestApiResult(
             isSuccess = false,
+            endpoint = endpointPath,
             headerTitle = e.message ?: e.toString(),
+            latencyMs = elapsedMs,
             content = "Не удалось связаться с $targetUrl. Убедитесь, что служба запущена."
         )
     } finally {
@@ -1039,6 +1118,7 @@ private suspend fun testLocalEndpoint(targetUrl: String, timeoutMs: Int = 1500):
 
 private suspend fun testSseEndpoint(targetUrl: String): TestApiResult = withContext(Dispatchers.IO) {
     var conn: HttpURLConnection? = null
+    val startNs = System.nanoTime()
     try {
         val url = URL(targetUrl)
         conn = (url.openConnection() as HttpURLConnection).apply {
@@ -1050,9 +1130,12 @@ private suspend fun testSseEndpoint(targetUrl: String): TestApiResult = withCont
         val code = conn.responseCode
         val msg = conn.responseMessage ?: ""
         if (code !in 200..299) {
+            val elapsedMs = (System.nanoTime() - startNs) / 1_000_000L
             return@withContext TestApiResult(
                 isSuccess = false,
-                headerTitle = "HTTP $code $msg",
+                endpoint = "/events (SSE)",
+                headerTitle = "HTTP $code $msg".trim(),
+                latencyMs = elapsedMs,
                 content = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
             )
         }
@@ -1064,18 +1147,37 @@ private suspend fun testSseEndpoint(targetUrl: String): TestApiResult = withCont
                 if (line.isEmpty() && lines.any { it.isNotBlank() }) break
             }
         }
+        val elapsedMs = (System.nanoTime() - startNs) / 1_000_000L
         TestApiResult(
             isSuccess = true,
+            endpoint = "/events (SSE)",
             headerTitle = "HTTP $code SSE Stream OK",
+            latencyMs = elapsedMs,
             content = lines.joinToString("\n")
         )
     } catch (e: Exception) {
+        val elapsedMs = (System.nanoTime() - startNs) / 1_000_000L
         TestApiResult(
             isSuccess = false,
+            endpoint = "/events (SSE)",
             headerTitle = e.message ?: e.toString(),
+            latencyMs = elapsedMs,
             content = "Ошибка проверки SSE $targetUrl"
         )
     } finally {
         conn?.disconnect()
+    }
+}
+
+private fun formatJsonIfPossible(raw: String): String {
+    val trimmed = raw.trim()
+    return try {
+        when {
+            trimmed.startsWith("{") -> JSONObject(trimmed).toString(2)
+            trimmed.startsWith("[") -> JSONArray(trimmed).toString(2)
+            else -> raw
+        }
+    } catch (_: Exception) {
+        raw
     }
 }

@@ -1,26 +1,36 @@
 package com.example.ui.components
 
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.CloudDownload
+import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Extension
@@ -30,25 +40,20 @@ import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.BottomSheetDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -59,8 +64,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -70,24 +76,29 @@ import androidx.compose.ui.unit.sp
 import com.example.plugin.PluginDownloader
 import com.example.plugin.RemotePluginFile
 import com.example.plugin.TelegramClientApp
-import com.example.ui.theme.CoralRed
-import com.example.ui.theme.DarkBackground
-import com.example.ui.theme.DarkSurface
-import com.example.ui.theme.DarkSurfaceHighlight
-import com.example.ui.theme.DarkSurfaceVariant
-import com.example.ui.theme.ElectricCyan
-import com.example.ui.theme.ElectricViolet
-import androidx.compose.ui.graphics.luminance
+import com.example.ui.theme.CardSurfaceDense
+import com.example.ui.theme.HairlineDivider
+import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.theme.LivingPaletteState
-import com.example.ui.theme.NeonEmerald
+import com.example.ui.theme.MintCta
+import com.example.ui.theme.MintCtaContent
+import com.example.ui.theme.NestedSurface
+import com.example.ui.theme.SecondaryGlass
+import com.example.ui.theme.SecondaryGlassText
+import com.example.ui.theme.SemanticCoral
+import com.example.ui.theme.SemanticEmerald
+import com.example.ui.theme.SheetSurface
+import com.example.ui.theme.SpecularStroke
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
-import com.example.ui.theme.rotatingBorderBrush
+import com.example.ui.theme.withTabularNumbers
+import com.example.util.AppMetadataResolver
 import kotlinx.coroutines.launch
 import java.io.File
 import java.util.Locale
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PluginSyncCard(
     context: Context,
@@ -95,11 +106,13 @@ fun PluginSyncCard(
     modifier: Modifier = Modifier
 ) {
     val scope = rememberCoroutineScope()
+    val haptic = LocalHapticFeedback.current
 
     var sourceUrl by remember { mutableStateOf(PluginDownloader.getSavedSourceUrl(context)) }
     var githubToken by remember { mutableStateOf(PluginDownloader.getSavedToken(context)) }
     var convertPyToPlugin by remember { mutableStateOf(PluginDownloader.getConvertPyToPlugin(context)) }
-    var showSourceSettings by remember { mutableStateOf(false) }
+
+    var showSourceSettingsSheet by remember { mutableStateOf(false) }
     var showTokenText by remember { mutableStateOf(false) }
 
     var isBusy by remember { mutableStateOf(false) }
@@ -108,13 +121,13 @@ fun PluginSyncCard(
     var isError by remember { mutableStateOf(false) }
     var cachedFile by remember { mutableStateOf(PluginDownloader.getCachedPluginFile(context)) }
     var availableFiles by remember { mutableStateOf<List<RemotePluginFile>>(emptyList()) }
-    var showFilePickerDialog by remember { mutableStateOf(false) }
+    var showFilePickerSheet by remember { mutableStateOf(false) }
     var telegramClientsForPicker by remember { mutableStateOf<List<TelegramClientApp>>(emptyList()) }
     var pendingShareFile by remember { mutableStateOf<File?>(null) }
 
-    fun persistSettings() {
-        PluginDownloader.saveSourceUrl(context, sourceUrl)
-        PluginDownloader.saveToken(context, githubToken)
+    fun persistSettings(urlValue: String = sourceUrl, tokenValue: String = githubToken) {
+        PluginDownloader.saveSourceUrl(context, urlValue)
+        PluginDownloader.saveToken(context, tokenValue)
     }
 
     fun shareFileToTelegram(file: File) {
@@ -172,7 +185,7 @@ fun PluginSyncCard(
                     list.first()
                 }
 
-                statusMessage = "Загрузка ${targetRemote.name} в кэш..."
+                statusMessage = "Загрузка ${targetRemote.name}..."
                 val downloaded = PluginDownloader.downloadPluginToCache(
                     context = context,
                     remoteFile = targetRemote,
@@ -183,14 +196,15 @@ fun PluginSyncCard(
                 }
                 cachedFile = downloaded
                 downloadProgress = 1f
-                statusMessage = "Готово: ${downloaded.name} (${formatBytes(downloaded.length())})"
+                statusMessage = null // Avoid duplicating cached bar below
+                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                 shareFileToTelegram(downloaded)
             } catch (e: Exception) {
                 isError = true
                 val msg = e.message ?: "не удалось скачать плагин"
                 statusMessage = "Ошибка: $msg"
                 if (msg.contains("404") || msg.contains("401") || msg.contains("403")) {
-                    showSourceSettings = true
+                    showSourceSettingsSheet = true
                 }
             } finally {
                 isBusy = false
@@ -205,7 +219,7 @@ fun PluginSyncCard(
             isBusy = true
             isError = false
             downloadProgress = null
-            statusMessage = "Загрузка списка файлов из GitHub..."
+            statusMessage = "Загрузка списка файлов..."
             try {
                 val list = PluginDownloader.fetchAvailablePlugins(
                     sourceUrl = sourceUrl,
@@ -216,15 +230,15 @@ fun PluginSyncCard(
                     isError = true
                     statusMessage = "Файлы не найдены"
                 } else {
-                    statusMessage = "Найдено файлов: ${list.size}"
-                    showFilePickerDialog = true
+                    statusMessage = null
+                    showFilePickerSheet = true
                 }
             } catch (e: Exception) {
                 isError = true
                 val msg = e.message ?: "не удалось получить список"
                 statusMessage = "Ошибка: $msg"
                 if (msg.contains("404") || msg.contains("401") || msg.contains("403")) {
-                    showSourceSettings = true
+                    showSourceSettingsSheet = true
                 }
             } finally {
                 isBusy = false
@@ -232,454 +246,569 @@ fun PluginSyncCard(
         }
     }
 
-    val accent = livingPalette.primary
-    val secondaryAccent = livingPalette.secondary
-    val onAccent = if (accent.luminance() > 0.42f) Color.Black else Color.White
-
-    Card(
-        modifier = modifier
-            .fillMaxWidth()
-            .testTag("plugin_sync_card"),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = DarkSurface.copy(alpha = 0.82f)),
-        border = BorderStroke(1.2.dp, rotatingBorderBrush(livingPalette, alpha = 0.50f, angleOffsetDeg = 30f))
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+        FrostedGlassCard(
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("plugin_sync_card"),
+            containerColor = CardSurfaceDense,
+            cornerRadius = 24.dp
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+            Column(
+                modifier = Modifier.padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
+                // Header: Title + GitHub -> Telegram badge + two 38dp circular buttons
                 Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Extension,
-                        contentDescription = null,
-                        tint = accent
-                    )
-                    Column {
-                        Text(
-                            text = "Плагин Clawd (GitHub → AprelGram / ТГ)",
-                            style = MaterialTheme.typography.titleMedium.copy(
-                                fontWeight = FontWeight.Bold,
-                                color = TextPrimary
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(38.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(NestedSurface),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Extension,
+                                contentDescription = null,
+                                tint = MintCta,
+                                modifier = Modifier.size(20.dp)
                             )
-                        )
-                        Text(
-                            text = sourceUrl.removePrefix("https://github.com/"),
-                            style = MaterialTheme.typography.bodySmall.copy(
-                                color = TextSecondary,
-                                fontSize = 11.sp
-                            ),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                }
+                        }
 
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(
-                        onClick = { showSourceSettings = !showSourceSettings },
-                        modifier = Modifier
-                            .minimumInteractiveComponentSize()
-                            .testTag("toggle_plugin_source_settings_button")
+                        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Text(
+                                text = "Плагин Clawd",
+                                style = MaterialTheme.typography.titleMedium.copy(
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = TextPrimary
+                                )
+                            )
+                            Surface(
+                                shape = RoundedCornerShape(999.dp),
+                                color = NestedSurface,
+                                border = BorderStroke(0.5.dp, SpecularStroke)
+                            ) {
+                                Text(
+                                    text = "GitHub → Telegram",
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        color = TextMuted
+                                    )
+                                )
+                            }
+                        }
+                    }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Settings,
+                        CircularToolbarIconButton(
+                            onClick = { showSourceSettingsSheet = true },
+                            icon = Icons.Default.Settings,
                             contentDescription = "Настройки URL и токена GitHub",
-                            tint = if (showSourceSettings) accent else TextSecondary
+                            modifier = Modifier.testTag("toggle_plugin_source_settings_button")
                         )
-                    }
 
-                    IconButton(
-                        onClick = {
-                            val target = sourceUrl.trim().ifEmpty { PluginDownloader.DEFAULT_SOURCE_URL }
-                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(target))
-                            runCatching { context.startActivity(intent) }
-                        },
-                        modifier = Modifier
-                            .minimumInteractiveComponentSize()
-                            .testTag("open_github_repo_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.OpenInNew,
+                        CircularToolbarIconButton(
+                            onClick = {
+                                val target = sourceUrl.trim().ifEmpty { PluginDownloader.DEFAULT_SOURCE_URL }
+                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(target))
+                                runCatching { context.startActivity(intent) }
+                            },
+                            icon = Icons.AutoMirrored.Filled.OpenInNew,
                             contentDescription = "Открыть GitHub в браузере",
-                            tint = TextSecondary
+                            modifier = Modifier.testTag("open_github_repo_button")
                         )
                     }
                 }
-            }
 
-            // Collapsible source URL & private repo PAT settings
-            AnimatedVisibility(visible = showSourceSettings) {
+                // Monospace repo path chip
                 Surface(
-                    shape = RoundedCornerShape(12.dp),
-                    color = DarkBackground,
-                    border = BorderStroke(1.dp, DarkSurfaceHighlight)
+                    shape = RoundedCornerShape(14.dp),
+                    color = NestedSurface,
+                    border = BorderStroke(0.5.dp, SpecularStroke),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Column(
+                    Text(
+                        text = sourceUrl.removePrefix("https://github.com/"),
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontFamily = JetBrainsMonoFontFamily,
+                            color = SecondaryGlassText
+                        ),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                // Toggle: convert .py -> .plugin
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = NestedSurface,
+                    border = BorderStroke(0.5.dp, SpecularStroke),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        OutlinedTextField(
-                            value = sourceUrl,
-                            onValueChange = {
-                                sourceUrl = it
-                                PluginDownloader.saveSourceUrl(context, it)
-                            },
-                            label = { Text("Ссылка GitHub (папка / файл / raw)", fontSize = 12.sp) },
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = Icons.Default.Link,
-                                    contentDescription = null,
-                                    tint = ElectricCyan,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            },
-                            singleLine = true,
-                            textStyle = MaterialTheme.typography.bodySmall.copy(
-                                fontFamily = FontFamily.Monospace,
-                                color = TextPrimary
-                            ),
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = ElectricViolet,
-                                unfocusedBorderColor = DarkSurfaceHighlight
-                            ),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("plugin_source_url_input")
-                        )
-
-                        OutlinedTextField(
-                            value = githubToken,
-                            onValueChange = {
-                                githubToken = it
-                                PluginDownloader.saveToken(context, it)
-                            },
-                            label = { Text("GitHub Token (если репозиторий приватный)", fontSize = 12.sp) },
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = Icons.Default.Key,
-                                    contentDescription = null,
-                                    tint = ElectricViolet,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            },
-                            trailingIcon = {
-                                IconButton(
-                                    onClick = { showTokenText = !showTokenText },
-                                    modifier = Modifier.minimumInteractiveComponentSize()
-                                ) {
-                                    Icon(
-                                        imageVector = if (showTokenText) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                                        contentDescription = "Показать или скрыть токен",
-                                        tint = TextSecondary
-                                    )
-                                }
-                            },
-                            visualTransformation = if (showTokenText) {
-                                VisualTransformation.None
-                            } else {
-                                PasswordVisualTransformation()
-                            },
-                            singleLine = true,
-                            textStyle = MaterialTheme.typography.bodySmall.copy(
-                                fontFamily = FontFamily.Monospace,
-                                color = TextPrimary
-                            ),
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = ElectricViolet,
-                                unfocusedBorderColor = DarkSurfaceHighlight
-                            ),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("plugin_github_token_input")
-                        )
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
+                        Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
                             Text(
-                                text = "Хранится локально. Для приватных репо нужен read-only токен.",
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    color = TextMuted,
-                                    fontSize = 10.sp
-                                ),
-                                modifier = Modifier.weight(1f)
+                                text = "Конвертировать .py → .plugin",
+                                style = MaterialTheme.typography.bodyMedium.copy(
+                                    fontWeight = FontWeight.Medium,
+                                    color = TextPrimary
+                                )
                             )
-                            TextButton(
-                                onClick = {
-                                    sourceUrl = PluginDownloader.DEFAULT_SOURCE_URL
-                                    PluginDownloader.saveSourceUrl(context, sourceUrl)
-                                }
+                            Text(
+                                text = "Для прямой установки в AprelGram / exteraGram",
+                                style = MaterialTheme.typography.bodySmall.copy(color = TextMuted)
+                            )
+                        }
+
+                        ExpressiveGlassSwitch(
+                            checked = convertPyToPlugin,
+                            onCheckedChange = { enabled ->
+                                convertPyToPlugin = enabled
+                                PluginDownloader.setConvertPyToPlugin(context, enabled)
+                            },
+                            modifier = Modifier.testTag("convert_py_to_plugin_switch")
+                        )
+                    }
+                }
+
+                // Primary Mint Mist CTA (#A7F3D0 / #042016)
+                MintCtaButton(
+                    onClick = { downloadAndShare(null) },
+                    enabled = !isBusy,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("download_and_share_plugin_button")
+                ) {
+                    if (isBusy) {
+                        WaveLoadingDots(
+                            color = MintCtaContent,
+                            phase = livingPalette.phase,
+                            modifier = Modifier.size(width = 24.dp, height = 16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        val pct = downloadProgress?.let { " (${(it * 100).toInt()}%)" } ?: ""
+                        Text(
+                            text = "Скачивание$pct",
+                            style = MaterialTheme.typography.labelLarge.withTabularNumbers().copy(
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        )
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.CloudDownload,
+                            contentDescription = null,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Скачать и отправить в Избранное",
+                            style = MaterialTheme.typography.labelLarge.copy(
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        )
+                    }
+                }
+
+                // Secondary Frosted Graphite Button
+                GraphiteGlassButton(
+                    onClick = { loadFileListForSelection() },
+                    enabled = !isBusy,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("choose_plugin_file_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.FolderZip,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Выбрать файл / версию на GitHub",
+                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Medium)
+                    )
+                }
+
+                AnimatedVisibility(visible = isBusy) {
+                    val progress = downloadProgress
+                    if (progress != null) {
+                        LinearProgressIndicator(
+                            progress = { progress },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(4.dp)
+                                .clip(RoundedCornerShape(2.dp)),
+                            color = MintCta,
+                            trackColor = NestedSurface
+                        )
+                    } else {
+                        LinearProgressIndicator(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(4.dp)
+                                .clip(RoundedCornerShape(2.dp)),
+                            color = MintCta,
+                            trackColor = NestedSurface
+                        )
+                    }
+                }
+
+                // Only show transient/error status if NOT duplicating the cached file card below
+                val showStatusLine = statusMessage != null && (isError || cachedFile == null)
+                AnimatedVisibility(visible = showStatusLine) {
+                    statusMessage?.let { msg ->
+                        Text(
+                            text = msg,
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                color = if (isError) SemanticCoral else SemanticEmerald,
+                                fontFamily = JetBrainsMonoFontFamily
+                            )
+                        )
+                    }
+                }
+
+                // Single deduplicated cached file row
+                cachedFile?.takeIf { it.exists() }?.let { file ->
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = NestedSurface,
+                        border = BorderStroke(0.5.dp, SpecularStroke),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(start = 12.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Description,
+                                contentDescription = null,
+                                tint = MintCta,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = file.name,
+                                    style = MaterialTheme.typography.bodySmall.copy(
+                                        color = TextPrimary,
+                                        fontFamily = JetBrainsMonoFontFamily,
+                                        fontWeight = FontWeight.SemiBold
+                                    ),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = "В кэше • ${formatBytes(file.length())}",
+                                    style = MaterialTheme.typography.labelSmall.withTabularNumbers().copy(
+                                        color = TextMuted
+                                    )
+                                )
+                            }
+
+                            IconButton(
+                                onClick = { shareFileToTelegram(file) },
+                                modifier = Modifier
+                                    .minimumInteractiveComponentSize()
+                                    .testTag("reshare_cached_plugin_button")
                             ) {
-                                Text("Сброс URL", fontSize = 11.sp, color = ElectricCyan)
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.Send,
+                                    contentDescription = "Отправить плагин в Telegram",
+                                    tint = MintCta,
+                                    modifier = Modifier.size(19.dp)
+                                )
+                            }
+
+                            IconButton(
+                                onClick = {
+                                    PluginDownloader.clearPluginCache(context)
+                                    cachedFile = null
+                                    statusMessage = null
+                                    isError = false
+                                    Toast.makeText(context, "Кэш плагина очищен", Toast.LENGTH_SHORT).show()
+                                },
+                                modifier = Modifier
+                                    .minimumInteractiveComponentSize()
+                                    .testTag("clear_plugin_cache_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.DeleteOutline,
+                                    contentDescription = "Удалить из кэша",
+                                    tint = TextMuted,
+                                    modifier = Modifier.size(19.dp)
+                                )
                             }
                         }
                     }
                 }
             }
+        }
 
-            // Toggle: rename .py -> .plugin for AprelGram / exteraGram
-            Surface(
-                shape = RoundedCornerShape(12.dp),
-                color = DarkBackground,
-                border = BorderStroke(1.dp, DarkSurfaceHighlight)
+        // Quick Install Guide Card
+        FrostedGlassCard(
+            modifier = Modifier.fillMaxWidth(),
+            containerColor = CardSurfaceDense,
+            cornerRadius = 24.dp
+        ) {
+            Column(
+                modifier = Modifier.padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Row(
+                Text(
+                    text = "Быстрая установка",
+                    style = MaterialTheme.typography.titleMedium.copy(
+                        fontWeight = FontWeight.SemiBold,
+                        color = TextPrimary
+                    )
+                )
+                QuickInstallStepRow(
+                    number = "1",
+                    text = "Нажмите «Скачать и отправить в Избранное»"
+                )
+                QuickInstallStepRow(
+                    number = "2",
+                    text = "Выберите AprelGram / exteraGram и отправьте файл себе"
+                )
+                QuickInstallStepRow(
+                    number = "3",
+                    text = "Откройте чат «Избранное» и тапните по .plugin для установки"
+                )
+            }
+        }
+    }
+
+    // ModalBottomSheet: GitHub URL & Token Settings (Filled TextFields, zero neon)
+    if (showSourceSettingsSheet) {
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        var draftUrl by remember(showSourceSettingsSheet) { mutableStateOf(sourceUrl) }
+        var draftToken by remember(showSourceSettingsSheet) { mutableStateOf(githubToken) }
+
+        ModalBottomSheet(
+            onDismissRequest = { showSourceSettingsSheet = false },
+            sheetState = sheetState,
+            containerColor = SheetSurface,
+            dragHandle = { BottomSheetDefaults.DragHandle(color = TextMuted.copy(alpha = 0.5f)) }
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(horizontal = 20.dp)
+                    .padding(bottom = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Text(
+                    text = "Источник плагина GitHub",
+                    style = MaterialTheme.typography.titleLarge.copy(color = TextPrimary)
+                )
+
+                TextField(
+                    value = draftUrl,
+                    onValueChange = { draftUrl = it },
+                    label = { Text("Ссылка GitHub (папка / файл / raw)") },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Default.Link,
+                            contentDescription = null,
+                            tint = MintCta
+                        )
+                    },
+                    trailingIcon = {
+                        if (draftUrl.isNotEmpty()) {
+                            IconButton(onClick = { draftUrl = "" }) {
+                                Icon(
+                                    imageVector = Icons.Default.Clear,
+                                    contentDescription = "Очистить ссылку",
+                                    tint = TextMuted
+                                )
+                            }
+                        } else {
+                            IconButton(
+                                onClick = {
+                                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                    val pasted = cm.primaryClip?.getItemAt(0)?.text?.toString()
+                                    if (!pasted.isNullOrBlank()) draftUrl = pasted
+                                }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.ContentPaste,
+                                    contentDescription = "Вставить из буфера",
+                                    tint = TextMuted
+                                )
+                            }
+                        }
+                    },
+                    singleLine = true,
+                    shape = RoundedCornerShape(16.dp),
+                    textStyle = MaterialTheme.typography.bodySmall.copy(
+                        fontFamily = JetBrainsMonoFontFamily,
+                        color = TextPrimary
+                    ),
+                    colors = TextFieldDefaults.colors(
+                        focusedContainerColor = NestedSurface,
+                        unfocusedContainerColor = NestedSurface,
+                        focusedIndicatorColor = Color.Transparent,
+                        unfocusedIndicatorColor = Color.Transparent,
+                        focusedLabelColor = MintCta,
+                        unfocusedLabelColor = TextMuted
+                    ),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                        Text(
-                            text = "Конвертировать .py → .plugin",
-                            style = MaterialTheme.typography.bodyMedium.copy(
-                                fontWeight = FontWeight.SemiBold,
-                                color = TextPrimary
-                            )
-                        )
-                        Text(
-                            text = "Для прямой установки в AprelGram / exteraGram",
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                color = TextSecondary,
-                                fontSize = 11.sp
-                            )
-                        )
-                    }
-                    Switch(
-                        checked = convertPyToPlugin,
-                        onCheckedChange = { enabled ->
-                            convertPyToPlugin = enabled
-                            PluginDownloader.setConvertPyToPlugin(context, enabled)
-                        },
-                        colors = SwitchDefaults.colors(
-                            checkedThumbColor = onAccent,
-                            checkedTrackColor = accent
-                        ),
-                        modifier = Modifier.testTag("convert_py_to_plugin_switch")
-                    )
-                }
-            }
-
-            // Primary action: download latest plugin into app cache and open Telegram Saved Messages picker
-            Button(
-                onClick = { downloadAndShare(null) },
-                enabled = !isBusy,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(48.dp)
-                    .testTag("download_and_share_plugin_button"),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = accent,
-                    contentColor = onAccent
-                ),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                if (isBusy) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(18.dp),
-                        color = onAccent,
-                        strokeWidth = 2.dp
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Скачивание...",
-                        fontWeight = FontWeight.SemiBold
-                    )
-                } else {
-                    Icon(
-                        imageVector = Icons.Default.CloudDownload,
-                        contentDescription = null,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Скачать и отправить в Избранное",
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            }
-
-            // Secondary row: choose specific version/file from GitHub
-            OutlinedButton(
-                onClick = { loadFileListForSelection() },
-                enabled = !isBusy,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(48.dp)
-                    .testTag("choose_plugin_file_button"),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = secondaryAccent),
-                border = BorderStroke(1.dp, secondaryAccent.copy(alpha = 0.50f)),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.FolderZip,
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp)
+                        .testTag("plugin_source_url_input")
                 )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = "Выбрать файл / версию на GitHub",
-                    fontWeight = FontWeight.Medium
-                )
-            }
 
-            AnimatedVisibility(visible = isBusy) {
-                val progress = downloadProgress
-                if (progress != null) {
-                    LinearProgressIndicator(
-                        progress = { progress },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(5.dp)
-                            .clip(RoundedCornerShape(3.dp)),
-                        color = accent,
-                        trackColor = DarkSurfaceHighlight
-                    )
-                } else {
-                    LinearProgressIndicator(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(5.dp)
-                            .clip(RoundedCornerShape(3.dp)),
-                        color = accent,
-                        trackColor = DarkSurfaceHighlight
-                    )
-                }
-            }
-
-            AnimatedVisibility(visible = statusMessage != null) {
-                statusMessage?.let { msg ->
-                    Text(
-                        text = msg,
-                        style = MaterialTheme.typography.bodySmall.copy(
-                            color = if (isError) CoralRed else NeonEmerald,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 11.sp
-                        )
-                    )
-                }
-            }
-
-            // Cached file bar (quick re-send or instant cache wipe)
-            cachedFile?.takeIf { it.exists() }?.let { file ->
-                Surface(
-                    shape = RoundedCornerShape(10.dp),
-                    color = DarkBackground,
-                    border = BorderStroke(1.dp, DarkSurfaceHighlight)
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Description,
-                            contentDescription = null,
-                            tint = ElectricCyan,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = file.name,
-                                style = MaterialTheme.typography.bodySmall.copy(
-                                    color = TextPrimary,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontWeight = FontWeight.SemiBold
-                                ),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Text(
-                                text = "Во временном кэше • ${formatBytes(file.length())}",
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    color = TextMuted,
-                                    fontSize = 10.sp
-                                )
-                            )
-                        }
-
-                        IconButton(
-                            onClick = { shareFileToTelegram(file) },
-                            modifier = Modifier
-                                .minimumInteractiveComponentSize()
-                                .testTag("reshare_cached_plugin_button")
-                        ) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    TextField(
+                        value = draftToken,
+                        onValueChange = { draftToken = it },
+                        label = { Text("GitHub Token (опционально)") },
+                        leadingIcon = {
                             Icon(
-                                imageVector = Icons.AutoMirrored.Filled.Send,
-                                contentDescription = "Отправить кэшированный плагин в Telegram",
-                                tint = NeonEmerald
-                            )
-                        }
-
-                        IconButton(
-                            onClick = {
-                                PluginDownloader.clearPluginCache(context)
-                                cachedFile = null
-                                statusMessage = "Временный кэш очищен"
-                                isError = false
-                                Toast.makeText(context, "Кэш плагина очищен", Toast.LENGTH_SHORT).show()
-                            },
-                            modifier = Modifier
-                                .minimumInteractiveComponentSize()
-                                .testTag("clear_plugin_cache_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.DeleteOutline,
-                                contentDescription = "Очистить временный кэш плагина",
+                                imageVector = Icons.Default.Key,
+                                contentDescription = null,
                                 tint = TextSecondary
                             )
-                        }
+                        },
+                        trailingIcon = {
+                            IconButton(
+                                onClick = { showTokenText = !showTokenText },
+                                modifier = Modifier.minimumInteractiveComponentSize()
+                            ) {
+                                Icon(
+                                    imageVector = if (showTokenText) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                    contentDescription = "Показать или скрыть токен",
+                                    tint = TextMuted
+                                )
+                            }
+                        },
+                        visualTransformation = if (showTokenText) {
+                            VisualTransformation.None
+                        } else {
+                            PasswordVisualTransformation()
+                        },
+                        singleLine = true,
+                        shape = RoundedCornerShape(16.dp),
+                        textStyle = MaterialTheme.typography.bodySmall.copy(
+                            fontFamily = JetBrainsMonoFontFamily,
+                            color = TextPrimary
+                        ),
+                        colors = TextFieldDefaults.colors(
+                            focusedContainerColor = NestedSurface,
+                            unfocusedContainerColor = NestedSurface,
+                            focusedIndicatorColor = Color.Transparent,
+                            unfocusedIndicatorColor = Color.Transparent,
+                            focusedLabelColor = MintCta,
+                            unfocusedLabelColor = TextMuted
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("plugin_github_token_input")
+                    )
+
+                    Text(
+                        text = "Хранится локально. Для приватных репозиториев нужен read-only токен.",
+                        style = MaterialTheme.typography.labelSmall.copy(color = TextMuted),
+                        modifier = Modifier.padding(horizontal = 4.dp)
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    GraphiteGlassButton(
+                        onClick = {
+                            draftUrl = PluginDownloader.DEFAULT_SOURCE_URL
+                            sourceUrl = PluginDownloader.DEFAULT_SOURCE_URL
+                            PluginDownloader.saveSourceUrl(context, draftUrl)
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Сброс URL", style = MaterialTheme.typography.labelLarge)
+                    }
+
+                    MintCtaButton(
+                        onClick = {
+                            sourceUrl = draftUrl.trim().ifEmpty { PluginDownloader.DEFAULT_SOURCE_URL }
+                            githubToken = draftToken.trim()
+                            persistSettings(sourceUrl, githubToken)
+                            showSourceSettingsSheet = false
+                            Toast.makeText(context, "Настройки сохранены", Toast.LENGTH_SHORT).show()
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(
+                            text = "Сохранить",
+                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold)
+                        )
                     }
                 }
             }
         }
     }
 
-    // Dialog to select a specific file if user tapped "Выбрать файл / версию"
-    if (showFilePickerDialog) {
-        AlertDialog(
-            onDismissRequest = { showFilePickerDialog = false },
-            containerColor = DarkSurfaceVariant,
-            title = {
+    // ModalBottomSheet: Select Remote File / Version on GitHub
+    if (showFilePickerSheet) {
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ModalBottomSheet(
+            onDismissRequest = { showFilePickerSheet = false },
+            sheetState = sheetState,
+            containerColor = SheetSurface,
+            dragHandle = { BottomSheetDefaults.DragHandle(color = TextMuted.copy(alpha = 0.5f)) }
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(horizontal = 20.dp)
+                    .padding(bottom = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
                 Text(
-                    text = "Найденные файлы",
-                    color = TextPrimary,
-                    fontWeight = FontWeight.Bold
+                    text = "Файлы на GitHub",
+                    style = MaterialTheme.typography.titleLarge.copy(color = TextPrimary)
                 )
-            },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    availableFiles.forEach { file ->
-                        Surface(
-                            shape = RoundedCornerShape(10.dp),
-                            color = DarkSurface,
-                            border = BorderStroke(1.dp, DarkSurfaceHighlight),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(10.dp))
-                                .clickable {
-                                    showFilePickerDialog = false
-                                    downloadAndShare(file)
-                                }
-                        ) {
+
+                Surface(
+                    shape = RoundedCornerShape(18.dp),
+                    color = NestedSurface,
+                    border = BorderStroke(0.5.dp, SpecularStroke),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column {
+                        availableFiles.forEachIndexed { idx, file ->
                             Row(
-                                modifier = Modifier.padding(12.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        showFilePickerSheet = false
+                                        downloadAndShare(file)
+                                    }
+                                    .padding(horizontal = 14.dp, vertical = 14.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
@@ -687,90 +816,149 @@ fun PluginSyncCard(
                                     text = file.name,
                                     style = MaterialTheme.typography.bodyMedium.copy(
                                         color = TextPrimary,
-                                        fontFamily = FontFamily.Monospace
+                                        fontFamily = JetBrainsMonoFontFamily,
+                                        fontWeight = FontWeight.Medium
                                     ),
                                     modifier = Modifier.weight(1f),
                                     maxLines = 2,
                                     overflow = TextOverflow.Ellipsis
                                 )
                                 if (file.sizeBytes > 0) {
-                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Spacer(modifier = Modifier.width(10.dp))
                                     Text(
                                         text = formatBytes(file.sizeBytes),
-                                        style = MaterialTheme.typography.labelSmall.copy(color = ElectricCyan)
+                                        style = MaterialTheme.typography.labelSmall.withTabularNumbers().copy(
+                                            color = MintCta
+                                        )
                                     )
                                 }
                             }
+                            if (idx < availableFiles.lastIndex) {
+                                HorizontalDivider(thickness = 0.5.dp, color = HairlineDivider)
+                            }
                         }
                     }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { showFilePickerDialog = false }) {
-                    Text("Закрыть", color = ElectricCyan)
                 }
             }
-        )
+        }
     }
 
-    // Dialog if multiple Telegram clients (e.g. Telegram + exteraGram + AyuGram) are installed
+    // ModalBottomSheet: Telegram Client Picker with real PackageManager icons
     pendingShareFile?.let { fileToShare ->
-        AlertDialog(
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ModalBottomSheet(
             onDismissRequest = { pendingShareFile = null },
-            containerColor = DarkSurfaceVariant,
-            title = {
-                Text(
-                    text = "Выберите Telegram-клиент",
-                    color = TextPrimary,
-                    fontWeight = FontWeight.Bold
-                )
-            },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            sheetState = sheetState,
+            containerColor = SheetSurface,
+            dragHandle = { BottomSheetDefaults.DragHandle(color = TextMuted.copy(alpha = 0.5f)) }
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(horizontal = 20.dp)
+                    .padding(bottom = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(
-                        text = "Выберите «Избранное» (Saved Messages) после открытия клиента:",
-                        style = MaterialTheme.typography.bodySmall.copy(color = TextSecondary)
+                        text = "Выберите Telegram-клиент",
+                        style = MaterialTheme.typography.titleLarge.copy(color = TextPrimary)
                     )
-                    telegramClientsForPicker.forEach { client ->
-                        Surface(
-                            shape = RoundedCornerShape(10.dp),
-                            color = DarkSurface,
-                            border = BorderStroke(1.dp, ElectricViolet.copy(alpha = 0.4f)),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(10.dp))
-                                .clickable {
-                                    pendingShareFile = null
-                                    val intent = PluginDownloader.buildShareToTelegramIntent(
-                                        context = context,
-                                        file = fileToShare,
-                                        targetPackage = client.packageName
+                    Text(
+                        text = "Отправьте файл в «Избранное» (Saved Messages) для быстрой установки",
+                        style = MaterialTheme.typography.bodySmall.copy(color = TextMuted)
+                    )
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(18.dp),
+                    color = NestedSurface,
+                    border = BorderStroke(0.5.dp, SpecularStroke),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column {
+                        telegramClientsForPicker.forEachIndexed { idx, client ->
+                            val resolved = remember(client.packageName) {
+                                AppMetadataResolver.resolveApp(context, client.packageName, client.label)
+                            }
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        pendingShareFile = null
+                                        val intent = PluginDownloader.buildShareToTelegramIntent(
+                                            context = context,
+                                            file = fileToShare,
+                                            targetPackage = client.packageName
+                                        )
+                                        context.startActivity(intent)
+                                    }
+                                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                if (resolved.icon != null) {
+                                    Image(
+                                        bitmap = resolved.icon,
+                                        contentDescription = null,
+                                        modifier = Modifier
+                                            .size(40.dp)
+                                            .clip(RoundedCornerShape(12.dp))
                                     )
-                                    context.startActivity(intent)
+                                } else {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(40.dp)
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(SecondaryGlass),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.AutoMirrored.Filled.Send,
+                                            contentDescription = null,
+                                            tint = MintCta,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
                                 }
-                        ) {
-                            Column(modifier = Modifier.padding(12.dp)) {
-                                Text(
-                                    text = client.label,
-                                    style = MaterialTheme.typography.titleSmall.copy(
-                                        color = TextPrimary,
-                                        fontWeight = FontWeight.SemiBold
+
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = resolved.displayName,
+                                        style = MaterialTheme.typography.titleSmall.copy(
+                                            color = TextPrimary,
+                                            fontWeight = FontWeight.Medium
+                                        ),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
-                                )
-                                Text(
-                                    text = client.packageName,
-                                    style = MaterialTheme.typography.labelSmall.copy(
-                                        color = TextMuted,
-                                        fontFamily = FontFamily.Monospace
+                                    Text(
+                                        text = client.packageName,
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            color = TextMuted,
+                                            fontFamily = JetBrainsMonoFontFamily
+                                        ),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
+                                }
+
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                                    contentDescription = null,
+                                    tint = TextMuted,
+                                    modifier = Modifier.size(16.dp)
                                 )
+                            }
+                            if (idx < telegramClientsForPicker.lastIndex) {
+                                HorizontalDivider(thickness = 0.5.dp, color = HairlineDivider)
                             }
                         }
                     }
                 }
-            },
-            confirmButton = {
-                TextButton(
+
+                GraphiteGlassButton(
                     onClick = {
                         pendingShareFile = null
                         val chooser = Intent.createChooser(
@@ -778,16 +966,76 @@ fun PluginSyncCard(
                             "Отправить плагин"
                         )
                         context.startActivity(chooser)
-                    }
+                    },
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("Другое приложение", color = ElectricCyan)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { pendingShareFile = null }) {
-                    Text("Отмена", color = TextSecondary)
+                    Text(
+                        text = "Другое приложение (системный выбор)",
+                        style = MaterialTheme.typography.labelLarge
+                    )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun CircularToolbarIconButton(
+    onClick: () -> Unit,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    contentDescription: String,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier
+            .size(48.dp)
+            .clip(CircleShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Surface(
+            shape = CircleShape,
+            color = NestedSurface,
+            border = BorderStroke(0.75.dp, SpecularStroke),
+            modifier = Modifier.size(38.dp)
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = contentDescription,
+                    tint = SecondaryGlassText,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun QuickInstallStepRow(number: String, text: String) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(22.dp)
+                .clip(CircleShape)
+                .background(NestedSurface),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = number,
+                style = MaterialTheme.typography.labelSmall.withTabularNumbers().copy(
+                    color = MintCta,
+                    fontWeight = FontWeight.Bold
+                )
+            )
+        }
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodySmall.copy(color = TextSecondary),
+            modifier = Modifier.weight(1f)
         )
     }
 }

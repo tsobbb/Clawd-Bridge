@@ -2,17 +2,27 @@ package com.example.ui.components
 
 import android.content.Intent
 import android.graphics.Bitmap
+import android.os.Build
 import android.provider.Settings
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -24,7 +34,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Album
 import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Pause
@@ -33,27 +43,39 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -63,22 +85,26 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.NowPlayingData
-import com.example.ui.theme.AmberWarning
-import com.example.ui.theme.CoralRed
-import com.example.ui.theme.DarkSurface
-import com.example.ui.theme.DarkSurfaceHighlight
-import com.example.ui.theme.DarkSurfaceVariant
-import com.example.ui.theme.ElectricViolet
+import com.example.ui.theme.CardSurfaceDense
+import com.example.ui.theme.CardSurfaceMonitor
 import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.theme.LivingPaletteState
-import com.example.ui.theme.NeonEmerald
+import com.example.ui.theme.MintCta
+import com.example.ui.theme.MintCtaContent
+import com.example.ui.theme.NestedSurface
+import com.example.ui.theme.SemanticAmber
+import com.example.ui.theme.SemanticCoral
+import com.example.ui.theme.SemanticEmerald
+import com.example.ui.theme.SpecularStroke
+import com.example.ui.theme.TextDim
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
-import com.example.ui.theme.heroRotatingBorderBrush
-import com.example.ui.theme.rotatingBorderBrush
-import com.example.ui.theme.shimmeringHorizontalBrush
+import com.example.ui.theme.withTabularNumbers
+import com.example.util.AppMetadataResolver
 import java.util.Locale
+import kotlin.math.PI
+import kotlin.math.sin
 
 @Composable
 fun MonitorTab(
@@ -102,7 +128,6 @@ fun MonitorTab(
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         ServiceStatusBanner(
-            livingPalette = livingPalette,
             isServiceConnected = isServiceConnected,
             isNotificationAccessGranted = isNotificationAccessGranted,
             onForceRebind = onForceRebind,
@@ -119,7 +144,6 @@ fun MonitorTab(
         )
 
         SimulatorCard(
-            livingPalette = livingPalette,
             isActive = isSimulatorActive,
             isPlaying = isSimulatorPlaying,
             onToggle = onToggleSimulator,
@@ -129,66 +153,68 @@ fun MonitorTab(
     }
 }
 
+private data class StatusBannerInfo(
+    val title: String,
+    val subtitle: String,
+    val tint: Color,
+    val icon: ImageVector
+)
+
 @Composable
 fun ServiceStatusBanner(
-    livingPalette: LivingPaletteState,
     isServiceConnected: Boolean,
     isNotificationAccessGranted: Boolean,
     onForceRebind: () -> Unit,
     onOpenSettings: () -> Unit
 ) {
-    val (statusText, subText, borderColor, bgColor, icon) = when {
-        isNotificationAccessGranted && isServiceConnected -> {
-            StatusBannerState(
-                status = "Служба активна",
-                subText = "IPC подключён • перехват и SSE работают в фоне",
-                color = NeonEmerald,
-                bg = Color(0xFF0C2418).copy(alpha = 0.80f),
-                icon = Icons.Default.CheckCircle
-            )
-        }
-        isNotificationAccessGranted && !isServiceConnected -> {
-            StatusBannerState(
-                status = "Восстановление связки...",
-                subText = "Авто-Rebind в процессе (нажмите для ручного сброса)",
-                color = AmberWarning,
-                bg = Color(0xFF28210C).copy(alpha = 0.84f),
-                icon = Icons.Default.Refresh
-            )
-        }
-        else -> {
-            StatusBannerState(
-                status = "Нужен доступ к уведомлениям",
-                subText = "Нажмите для включения чтения медиа-сессий",
-                color = CoralRed,
-                bg = Color(0xFF2A1010).copy(alpha = 0.86f),
-                icon = Icons.Default.Error
-            )
-        }
+    val info = when {
+        isNotificationAccessGranted && isServiceConnected -> StatusBannerInfo(
+            title = "Служба активна",
+            subtitle = "IPC подключён • перехват и SSE работают в фоне",
+            tint = SemanticEmerald,
+            icon = Icons.Default.CheckCircle
+        )
+        isNotificationAccessGranted && !isServiceConnected -> StatusBannerInfo(
+            title = "Восстановление связки...",
+            subtitle = "Авто-Rebind в процессе • нажмите для сброса",
+            tint = SemanticAmber,
+            icon = Icons.Default.Refresh
+        )
+        else -> StatusBannerInfo(
+            title = "Нужен доступ к уведомлениям",
+            subtitle = "Включите разрешение для чтения медиа-сессий",
+            tint = SemanticCoral,
+            icon = Icons.Default.ErrorOutline
+        )
     }
 
-    val bannerBorder = if (isNotificationAccessGranted && isServiceConnected && livingPalette.isTrackActive) {
-        BorderStroke(1.dp, rotatingBorderBrush(livingPalette, alpha = 0.48f, angleOffsetDeg = 45f))
-    } else {
-        BorderStroke(1.dp, borderColor.copy(alpha = 0.55f))
-    }
+    val pulseTransition = rememberInfiniteTransition(label = "status_icon_pulse")
+    val pulseAlpha by pulseTransition.animateFloat(
+        initialValue = 0.65f,
+        targetValue = 1.0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1800, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "status_pulse_alpha"
+    )
 
-    Card(
-        onClick = {
-            if (!isNotificationAccessGranted) onOpenSettings()
-            else if (!isServiceConnected) onForceRebind()
-        },
+    FrostedGlassCard(
         modifier = Modifier
             .fillMaxWidth()
-            .testTag("service_status_banner"),
-        shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(containerColor = bgColor),
-        border = bannerBorder
+            .testTag("service_status_banner")
+            .clip(RoundedCornerShape(22.dp))
+            .clickable {
+                if (!isNotificationAccessGranted) onOpenSettings()
+                else if (!isServiceConnected) onForceRebind()
+            },
+        containerColor = CardSurfaceDense,
+        cornerRadius = 22.dp
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(14.dp),
+                .padding(horizontal = 16.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
@@ -196,32 +222,50 @@ fun ServiceStatusBanner(
                 modifier = Modifier
                     .size(40.dp)
                     .clip(CircleShape)
-                    .background(borderColor.copy(alpha = 0.2f)),
+                    .background(info.tint.copy(alpha = 0.14f)),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
-                    imageVector = icon,
-                    contentDescription = null,
-                    tint = borderColor,
-                    modifier = Modifier.size(22.dp)
+                    imageVector = info.icon,
+                    contentDescription = info.title,
+                    tint = info.tint.copy(alpha = if (isServiceConnected) pulseAlpha else 1f),
+                    modifier = Modifier.size(21.dp)
                 )
             }
 
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = statusText,
+                    text = info.title,
                     style = MaterialTheme.typography.titleMedium.copy(
-                        fontWeight = FontWeight.Bold,
-                        color = borderColor
+                        fontWeight = FontWeight.SemiBold,
+                        color = TextPrimary
                     )
                 )
                 Text(
-                    text = subText,
-                    style = MaterialTheme.typography.bodySmall.copy(color = TextSecondary)
+                    text = info.subtitle,
+                    style = MaterialTheme.typography.bodySmall.copy(color = TextMuted),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
 
-            if (isNotificationAccessGranted && !isServiceConnected) {
+            if (!isNotificationAccessGranted) {
+                Button(
+                    onClick = onOpenSettings,
+                    shape = RoundedCornerShape(16.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MintCta,
+                        contentColor = MintCtaContent
+                    ),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                    modifier = Modifier.height(40.dp)
+                ) {
+                    Text(
+                        text = "Включить",
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold)
+                    )
+                }
+            } else if (!isServiceConnected) {
                 IconButton(
                     onClick = onForceRebind,
                     modifier = Modifier.minimumInteractiveComponentSize()
@@ -229,21 +273,13 @@ fun ServiceStatusBanner(
                     Icon(
                         imageVector = Icons.Default.Sync,
                         contentDescription = "Сбросить и переподключить",
-                        tint = AmberWarning
+                        tint = SemanticAmber
                     )
                 }
             }
         }
     }
 }
-
-private data class StatusBannerState(
-    val status: String,
-    val subText: String,
-    val color: Color,
-    val bg: Color,
-    val icon: androidx.compose.ui.graphics.vector.ImageVector
-)
 
 @Composable
 private fun HeroLiveMonitorCard(
@@ -252,36 +288,102 @@ private fun HeroLiveMonitorCard(
     livingPalette: LivingPaletteState,
     isSimulatorActive: Boolean
 ) {
-    val accentColor = livingPalette.primary
-    val accentColor2 = livingPalette.secondary
-    val accentColor3 = livingPalette.tertiary
+    val context = LocalContext.current
+    val hasMedia = liveState.hasMedia
     val isPlaying = liveState.hasMedia && liveState.isPlaying
+    val playerAccent = livingPalette.playerAccent
 
     val imageBitmap = remember(artworkBitmap) {
         artworkBitmap?.takeIf { !it.isRecycled }?.asImageBitmap()
     }
 
-    Card(
+    val coverScale by animateFloatAsState(
+        targetValue = if (isPlaying) 1.0f else 0.94f,
+        animationSpec = tween(durationMillis = 360, easing = FastOutSlowInEasing),
+        label = "cover_pause_scale"
+    )
+
+    // Smooth 60/120 FPS client-side position interpolation between 250ms engine ticks
+    var displayPositionMs by remember { mutableLongStateOf(liveState.positionMs) }
+    LaunchedEffect(
+        liveState.positionMs,
+        liveState.isPlaying,
+        liveState.playbackSpeed,
+        liveState.durationMs,
+        liveState.title,
+        liveState.hasMedia
+    ) {
+        displayPositionMs = liveState.positionMs
+        if (liveState.hasMedia && liveState.isPlaying) {
+            var lastNanos = 0L
+            while (true) {
+                withFrameNanos { nanos ->
+                    if (lastNanos != 0L) {
+                        val dtMs = ((nanos - lastNanos).coerceIn(0L, 100_000_000L) / 1_000_000.0)
+                        val speed = if (liveState.playbackSpeed > 0f) liveState.playbackSpeed else 1f
+                        val next = displayPositionMs + (dtMs * speed).toLong()
+                        displayPositionMs = if (liveState.durationMs > 0L) {
+                            next.coerceIn(0L, liveState.durationMs)
+                        } else {
+                            next.coerceAtLeast(0L)
+                        }
+                    }
+                    lastNanos = nanos
+                }
+            }
+        }
+    }
+
+    val cardBaseColor = remember(CardSurfaceMonitor, livingPalette.cardTint, hasMedia) {
+        if (hasMedia) lerp(CardSurfaceMonitor, livingPalette.cardTint.copy(alpha = 0.80f), 0.35f)
+        else CardSurfaceMonitor
+    }
+
+    FrostedGlassCard(
         modifier = Modifier
             .fillMaxWidth()
             .testTag("live_monitor_card"),
-        shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(containerColor = DarkSurface.copy(alpha = 0.80f)),
-        border = BorderStroke(
-            width = if (isPlaying) 2.dp else 1.2.dp,
-            brush = heroRotatingBorderBrush(livingPalette)
-        )
+        containerColor = cardBaseColor,
+        cornerRadius = 26.dp,
+        borderColor = SpecularStroke
     ) {
-        val washAlpha = if (isPlaying) 0.16f + 0.06f * livingPalette.auraPulse else 0.05f
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(rotatingBorderBrush(livingPalette, alpha = washAlpha, angleOffsetDeg = 90f))
-        ) {
+        Box(modifier = Modifier.fillMaxWidth()) {
+            // Subtle deeply blurred artwork reflection inside hero card
+            if (hasMedia && imageBitmap != null) {
+                val blurMod = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    Modifier.blur(45.dp)
+                } else {
+                    Modifier
+                }
+                Image(
+                    bitmap = imageBitmap,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .matchParentSize()
+                        .alpha(if (isPlaying) 0.16f else 0.08f)
+                        .then(blurMod)
+                )
+            } else if (hasMedia) {
+                Box(
+                    modifier = Modifier
+                        .matchParentSize()
+                        .background(
+                            Brush.radialGradient(
+                                colors = listOf(
+                                    livingPalette.cardTint.copy(alpha = 0.55f),
+                                    Color.Transparent
+                                )
+                            )
+                        )
+                )
+            }
+
             Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
+                modifier = Modifier.padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
+                // Header: Equalizer + LIVE MONITOR + 250ms | Palette dots + SIMULATOR
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -291,51 +393,68 @@ private fun HeroLiveMonitorCard(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(10.dp)
-                                .clip(CircleShape)
-                                .background(if (isPlaying) accentColor else TextMuted)
+                        MiniEqualizerBars(
+                            isPlaying = isPlaying,
+                            color = if (isPlaying) playerAccent else TextDim,
+                            modifier = Modifier.size(width = 16.dp, height = 14.dp)
                         )
                         Text(
-                            text = "LIVE MONITOR • 250 ms",
+                            text = "LIVE MONITOR",
                             style = MaterialTheme.typography.labelMedium.copy(
                                 fontWeight = FontWeight.Bold,
-                                color = if (isPlaying) accentColor else TextMuted,
-                                letterSpacing = 1.sp
+                                color = if (isPlaying) playerAccent else TextMuted,
+                                letterSpacing = 0.9.sp
                             )
                         )
+                        Surface(
+                            shape = RoundedCornerShape(999.dp),
+                            color = NestedSurface,
+                            border = BorderStroke(0.5.dp, SpecularStroke)
+                        ) {
+                            Text(
+                                text = "250 ms",
+                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+                                style = MaterialTheme.typography.labelSmall.withTabularNumbers().copy(
+                                    fontFamily = JetBrainsMonoFontFamily,
+                                    color = TextMuted
+                                )
+                            )
+                        }
                     }
 
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        if (isPlaying) {
+                        if (hasMedia) {
                             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                listOf(accentColor, accentColor2, accentColor3).forEach { dotColor ->
+                                listOf(
+                                    livingPalette.playerAccent,
+                                    livingPalette.playerAccentSecondary,
+                                    livingPalette.playerAccentTertiary
+                                ).forEach { dot ->
                                     Box(
                                         modifier = Modifier
-                                            .size(8.dp)
+                                            .size(6.dp)
                                             .clip(CircleShape)
-                                            .background(dotColor)
+                                            .background(dot)
                                     )
                                 }
                             }
                         }
 
-                        if (isPlaying && liveState.playbackSpeed != 1.0f) {
+                        if (hasMedia && liveState.playbackSpeed != 1.0f) {
                             Surface(
-                                shape = RoundedCornerShape(6.dp),
-                                color = accentColor.copy(alpha = 0.20f)
+                                shape = RoundedCornerShape(999.dp),
+                                color = NestedSurface
                             ) {
                                 Text(
                                     text = String.format(Locale.US, "%.2fx", liveState.playbackSpeed),
-                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                    style = MaterialTheme.typography.labelSmall.copy(
+                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+                                    style = MaterialTheme.typography.labelSmall.withTabularNumbers().copy(
                                         fontFamily = JetBrainsMonoFontFamily,
-                                        color = accentColor,
-                                        fontWeight = FontWeight.Bold
+                                        color = playerAccent,
+                                        fontWeight = FontWeight.SemiBold
                                     )
                                 )
                             }
@@ -343,15 +462,16 @@ private fun HeroLiveMonitorCard(
 
                         if (isSimulatorActive) {
                             Surface(
-                                shape = RoundedCornerShape(6.dp),
-                                color = ElectricViolet.copy(alpha = 0.22f)
+                                shape = RoundedCornerShape(999.dp),
+                                color = NestedSurface,
+                                border = BorderStroke(0.5.dp, SpecularStroke)
                             ) {
                                 Text(
                                     text = "SIMULATOR",
-                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
                                     style = MaterialTheme.typography.labelSmall.copy(
-                                        color = ElectricViolet,
-                                        fontWeight = FontWeight.Bold
+                                        color = TextSecondary,
+                                        fontWeight = FontWeight.SemiBold
                                     )
                                 )
                             }
@@ -359,76 +479,68 @@ private fun HeroLiveMonitorCard(
                     }
                 }
 
-                HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+                if (hasMedia) {
+                    val resolvedPlayer = remember(liveState.player) {
+                        AppMetadataResolver.resolveApp(context, liveState.player)
+                    }
 
-                if (isPlaying) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(14.dp),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Artwork box wrapped in radial ambient halo + rotating multi-color border
+                        // Artwork 80.dp, 16.dp corner radius, subtle elevation, NO neon borders
                         Box(
-                            modifier = Modifier.size(96.dp),
+                            modifier = Modifier
+                                .size(80.dp)
+                                .graphicsLayer {
+                                    scaleX = coverScale
+                                    scaleY = coverScale
+                                }
+                                .shadow(elevation = 16.dp, shape = RoundedCornerShape(16.dp), clip = false)
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(livingPalette.cardTint),
                             contentAlignment = Alignment.Center
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .clip(RoundedCornerShape(20.dp))
-                                    .background(
-                                        Brush.radialGradient(
-                                            colors = listOf(
-                                                accentColor.copy(alpha = 0.40f + 0.14f * livingPalette.auraPulse),
-                                                accentColor2.copy(alpha = 0.18f),
-                                                Color.Transparent
+                            if (imageBitmap != null) {
+                                Image(
+                                    bitmap = imageBitmap,
+                                    contentDescription = "Обложка трека",
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            } else {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .background(
+                                            Brush.linearGradient(
+                                                listOf(
+                                                    livingPalette.blobPrimary.copy(alpha = 0.7f),
+                                                    livingPalette.blobSecondary.copy(alpha = 0.6f)
+                                                )
                                             )
-                                        )
+                                        ),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Album,
+                                        contentDescription = "Обложка отсутствует",
+                                        tint = playerAccent,
+                                        modifier = Modifier.size(34.dp)
                                     )
-                            )
-
-                            Surface(
-                                shape = RoundedCornerShape(15.dp),
-                                color = DarkSurfaceVariant,
-                                border = BorderStroke(
-                                    width = 2.dp,
-                                    brush = heroRotatingBorderBrush(livingPalette)
-                                ),
-                                modifier = Modifier.size(86.dp)
-                            ) {
-                                if (imageBitmap != null) {
-                                    Image(
-                                        bitmap = imageBitmap,
-                                        contentDescription = "Обложка трека",
-                                        contentScale = ContentScale.Crop,
-                                        modifier = Modifier.fillMaxSize()
-                                    )
-                                } else {
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxSize()
-                                            .background(rotatingBorderBrush(livingPalette, alpha = 0.30f)),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Album,
-                                            contentDescription = "Обложка отсутствует",
-                                            tint = TextPrimary.copy(alpha = 0.85f),
-                                            modifier = Modifier.size(38.dp)
-                                        )
-                                    }
                                 }
                             }
                         }
 
                         Column(
                             modifier = Modifier.weight(1f),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                            verticalArrangement = Arrangement.spacedBy(3.dp)
                         ) {
                             Text(
                                 text = liveState.title.ifEmpty { "Без названия" },
                                 style = MaterialTheme.typography.titleLarge.copy(
-                                    fontWeight = FontWeight.Bold,
+                                    fontWeight = FontWeight.SemiBold,
                                     color = TextPrimary
                                 ),
                                 maxLines = 2,
@@ -437,7 +549,7 @@ private fun HeroLiveMonitorCard(
 
                             Text(
                                 text = liveState.artist.ifEmpty { "Неизвестный артист" },
-                                style = MaterialTheme.typography.bodyMedium.copy(
+                                style = MaterialTheme.typography.titleSmall.copy(
                                     color = TextSecondary,
                                     fontWeight = FontWeight.Medium
                                 ),
@@ -448,102 +560,125 @@ private fun HeroLiveMonitorCard(
                             if (liveState.album.isNotBlank()) {
                                 Text(
                                     text = liveState.album,
-                                    style = MaterialTheme.typography.bodySmall.copy(color = TextMuted),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-
-                            Spacer(modifier = Modifier.height(2.dp))
-
-                            Surface(
-                                shape = RoundedCornerShape(6.dp),
-                                color = DarkSurfaceVariant.copy(alpha = 0.85f),
-                                border = BorderStroke(0.8.dp, accentColor.copy(alpha = 0.35f))
-                            ) {
-                                Text(
-                                    text = liveState.player.ifEmpty { "com.android.music" },
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
-                                    style = MaterialTheme.typography.labelSmall.copy(
-                                        fontFamily = JetBrainsMonoFontFamily,
-                                        color = accentColor
+                                    style = MaterialTheme.typography.bodySmall.copy(
+                                        color = TextMuted,
+                                        fontSize = 13.sp
                                     ),
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
                             }
+
+                            Spacer(modifier = Modifier.height(3.dp))
+
+                            // Frosted glass source chip with real PackageManager icon & friendly player name
+                            Surface(
+                                shape = RoundedCornerShape(999.dp),
+                                color = NestedSurface,
+                                border = BorderStroke(0.5.dp, SpecularStroke)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    if (resolvedPlayer.icon != null) {
+                                        Image(
+                                            bitmap = resolvedPlayer.icon,
+                                            contentDescription = null,
+                                            modifier = Modifier
+                                                .size(15.dp)
+                                                .clip(RoundedCornerShape(4.dp))
+                                        )
+                                    } else {
+                                        Icon(
+                                            imageVector = Icons.Default.MusicNote,
+                                            contentDescription = null,
+                                            tint = playerAccent,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                    }
+                                    Text(
+                                        text = resolvedPlayer.displayName,
+                                        style = MaterialTheme.typography.labelMedium.copy(
+                                            color = TextSecondary,
+                                            fontWeight = FontWeight.Medium
+                                        ),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
                         }
                     }
 
-                    val progressFraction = if (liveState.durationMs > 0) {
-                        (liveState.positionMs.toFloat() / liveState.durationMs.toFloat()).coerceIn(0f, 1f)
+                    val progressFraction = if (liveState.durationMs > 0L) {
+                        (displayPositionMs.toFloat() / liveState.durationMs.toFloat()).coerceIn(0f, 1f)
                     } else 0f
 
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        WavyPlaybackProgressBar(
+                            fraction = progressFraction,
+                            isPlaying = isPlaying,
+                            activeColor = playerAccent,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(22.dp)
+                        )
+
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.Bottom
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = formatTimecode(liveState.positionMs),
-                                style = MaterialTheme.typography.headlineSmall.copy(
+                                text = formatTimecode(displayPositionMs),
+                                style = MaterialTheme.typography.titleMedium.withTabularNumbers().copy(
                                     fontFamily = JetBrainsMonoFontFamily,
                                     fontWeight = FontWeight.Bold,
-                                    color = accentColor
+                                    color = playerAccent
                                 )
                             )
                             Text(
                                 text = formatTimecode(liveState.durationMs),
-                                style = MaterialTheme.typography.titleMedium.copy(
+                                style = MaterialTheme.typography.bodySmall.withTabularNumbers().copy(
                                     fontFamily = JetBrainsMonoFontFamily,
-                                    color = TextSecondary
+                                    color = TextMuted
                                 )
                             )
-                        }
-
-                        // Living gradient progress bar
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(7.dp)
-                                .clip(RoundedCornerShape(4.dp))
-                                .background(DarkSurfaceHighlight.copy(alpha = 0.72f))
-                        ) {
-                            if (progressFraction > 0f) {
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth(progressFraction)
-                                        .fillMaxHeight()
-                                        .clip(RoundedCornerShape(4.dp))
-                                        .background(shimmeringHorizontalBrush(livingPalette, alpha = 1f))
-                                )
-                            }
                         }
                     }
                 } else {
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 18.dp),
+                            .padding(vertical = 22.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.MusicNote,
-                            contentDescription = null,
-                            tint = accentColor.copy(alpha = 0.75f),
-                            modifier = Modifier.size(34.dp)
-                        )
+                        Box(
+                            modifier = Modifier
+                                .size(48.dp)
+                                .clip(CircleShape)
+                                .background(NestedSurface),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.MusicNote,
+                                contentDescription = null,
+                                tint = TextMuted,
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
                         Text(
                             text = "Музыка не играет",
                             style = MaterialTheme.typography.titleMedium.copy(
                                 color = TextSecondary,
-                                fontWeight = FontWeight.Medium
+                                fontWeight = FontWeight.SemiBold
                             )
                         )
                         Text(
-                            text = "Включите трек в SoundCloud, Spotify, VK, Яндекс Музыке или запустите симулятор ниже",
+                            text = "Включите трек в SoundCloud, Spotify, Яндекс Музыке или запустите симулятор ниже",
                             style = MaterialTheme.typography.bodySmall.copy(color = TextMuted),
                             modifier = Modifier.padding(horizontal = 16.dp),
                             textAlign = TextAlign.Center
@@ -556,117 +691,231 @@ private fun HeroLiveMonitorCard(
 }
 
 @Composable
+private fun MiniEqualizerBars(
+    isPlaying: Boolean,
+    color: Color,
+    modifier: Modifier = Modifier
+) {
+    val transition = rememberInfiniteTransition(label = "mini_eq")
+    val bar1 by transition.animateFloat(
+        initialValue = 0.25f,
+        targetValue = 0.95f,
+        animationSpec = infiniteRepeatable(tween(420), RepeatMode.Reverse),
+        label = "eq_b1"
+    )
+    val bar2 by transition.animateFloat(
+        initialValue = 0.90f,
+        targetValue = 0.30f,
+        animationSpec = infiniteRepeatable(tween(530), RepeatMode.Reverse),
+        label = "eq_b2"
+    )
+    val bar3 by transition.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 0.88f,
+        animationSpec = infiniteRepeatable(tween(370), RepeatMode.Reverse),
+        label = "eq_b3"
+    )
+    val activeFactor by animateFloatAsState(
+        targetValue = if (isPlaying) 1f else 0f,
+        animationSpec = tween(280),
+        label = "eq_active"
+    )
+
+    Canvas(modifier = modifier) {
+        val w = size.width
+        val h = size.height
+        val barWidth = w / 5f
+        val heights = listOf(bar1, bar2, bar3).map { dynamic ->
+            val rest = 0.24f
+            h * (rest + (dynamic - rest) * activeFactor)
+        }
+        heights.forEachIndexed { index, barH ->
+            val x = index * (barWidth * 1.8f)
+            drawRoundRect(
+                color = color,
+                topLeft = Offset(x, h - barH),
+                size = Size(barWidth, barH),
+                cornerRadius = CornerRadius(barWidth / 2f, barWidth / 2f)
+            )
+        }
+    }
+}
+
+@Composable
+private fun WavyPlaybackProgressBar(
+    fraction: Float,
+    isPlaying: Boolean,
+    activeColor: Color,
+    modifier: Modifier = Modifier
+) {
+    val amplitudeMultiplier by animateFloatAsState(
+        targetValue = if (isPlaying) 1f else 0f,
+        animationSpec = tween(durationMillis = 360, easing = FastOutSlowInEasing),
+        label = "wave_amp"
+    )
+
+    var wavePhase by remember { mutableFloatStateOf(0f) }
+    LaunchedEffect(isPlaying) {
+        if (!isPlaying) return@LaunchedEffect
+        var lastNanos = 0L
+        while (true) {
+            withFrameNanos { nanos ->
+                if (lastNanos != 0L) {
+                    val dt = ((nanos - lastNanos).coerceIn(0L, 100_000_000L)) / 1_000_000_000f
+                    wavePhase = (wavePhase + dt * 4.5f) % (2f * PI.toFloat())
+                }
+                lastNanos = nanos
+            }
+        }
+    }
+
+    Canvas(modifier = modifier) {
+        val cy = size.height / 2f
+        val width = size.width
+        val clampedFraction = fraction.coerceIn(0f, 1f)
+        val splitX = (width * clampedFraction).coerceIn(0f, width)
+        val strokePx = 3.5.dp.toPx()
+
+        // Remaining inactive track
+        drawLine(
+            color = Color.White.copy(alpha = 0.14f),
+            start = Offset(splitX, cy),
+            end = Offset(width, cy),
+            strokeWidth = 3.dp.toPx(),
+            cap = StrokeCap.Round
+        )
+
+        if (splitX > 2f) {
+            val waveAmp = 2.6.dp.toPx() * amplitudeMultiplier
+            val wavelengthPx = 26.dp.toPx()
+            val stepPx = 3f
+            val path = Path()
+            var x = 0f
+            while (x <= splitX) {
+                val edgeTaper = ((splitX - x) / 14f).coerceIn(0f, 1f) * (x / 10f).coerceIn(0f, 1f)
+                val y = cy + sin((x / wavelengthPx) * 2f * PI.toFloat() - wavePhase) * waveAmp * edgeTaper
+                if (x == 0f) path.moveTo(x, y) else path.lineTo(x, y)
+                x += stepPx
+            }
+            path.lineTo(splitX, cy)
+
+            drawPath(
+                path = path,
+                color = activeColor,
+                style = Stroke(width = strokePx, cap = StrokeCap.Round, join = StrokeJoin.Round)
+            )
+        }
+
+        // Playhead thumb dot
+        drawCircle(
+            color = activeColor,
+            radius = 5.dp.toPx(),
+            center = Offset(splitX, cy)
+        )
+    }
+}
+
+@Composable
 private fun SimulatorCard(
-    livingPalette: LivingPaletteState,
     isActive: Boolean,
     isPlaying: Boolean,
     onToggle: (Boolean) -> Unit,
     onPlayPause: () -> Unit,
     onSeekForward: () -> Unit
 ) {
-    val toggleTrack = livingPalette.primary
-    val toggleThumb = if (toggleTrack.luminance() > 0.42f) Color.Black else Color.White
-
-    Card(
+    FrostedGlassCard(
         modifier = Modifier
             .fillMaxWidth()
             .testTag("simulator_card"),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = DarkSurfaceVariant.copy(alpha = 0.78f)),
-        border = BorderStroke(
-            1.dp,
-            rotatingBorderBrush(livingPalette, alpha = if (isActive) 0.72f else 0.30f, angleOffsetDeg = 180f)
-        )
+        containerColor = CardSurfaceDense,
+        cornerRadius = 24.dp
     ) {
         Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            modifier = Modifier.padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
                     Text(
                         text = "Тестовый симулятор плеера",
                         style = MaterialTheme.typography.titleMedium.copy(
-                            fontWeight = FontWeight.Bold,
+                            fontWeight = FontWeight.SemiBold,
                             color = TextPrimary
                         )
                     )
                     Text(
                         text = "Juice WRLD — Lean Wit Me (с обложкой и SSE)",
-                        style = MaterialTheme.typography.bodySmall.copy(color = TextSecondary)
+                        style = MaterialTheme.typography.bodySmall.copy(color = TextMuted)
                     )
                 }
 
-                Switch(
+                ExpressiveGlassSwitch(
                     checked = isActive,
                     onCheckedChange = onToggle,
-                    colors = SwitchDefaults.colors(
-                        checkedThumbColor = toggleThumb,
-                        checkedTrackColor = toggleTrack
-                    ),
                     modifier = Modifier.testTag("simulator_toggle_switch")
                 )
             }
 
+            // Connected Button Group in frosted graphite glass
             AnimatedVisibility(visible = isActive) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    horizontalArrangement = Arrangement.spacedBy(3.dp)
                 ) {
-                    val primaryBtnColor = if (isPlaying) CoralRed else livingPalette.primary
-                    val primaryBtnContent = if (primaryBtnColor.luminance() > 0.42f) Color.Black else Color.White
-                    Button(
+                    GraphiteGlassButton(
                         onClick = onPlayPause,
+                        shapeOverride = RoundedCornerShape(
+                            topStart = 24.dp,
+                            bottomStart = 24.dp,
+                            topEnd = 8.dp,
+                            bottomEnd = 8.dp
+                        ),
                         modifier = Modifier
                             .weight(1f)
-                            .height(48.dp)
-                            .testTag("simulator_play_pause_button"),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = primaryBtnColor,
-                            contentColor = primaryBtnContent
-                        ),
-                        shape = RoundedCornerShape(10.dp)
+                            .testTag("simulator_play_pause_button")
                     ) {
                         Icon(
                             imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                            contentDescription = null
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text(text = if (isPlaying) "Пауза" else "Играть")
+                        Text(
+                            text = if (isPlaying) "Пауза" else "Играть",
+                            style = MaterialTheme.typography.labelLarge
+                        )
                     }
 
-                    OutlinedButton(
+                    GraphiteGlassButton(
                         onClick = onSeekForward,
+                        shapeOverride = RoundedCornerShape(
+                            topStart = 8.dp,
+                            bottomStart = 8.dp,
+                            topEnd = 24.dp,
+                            bottomEnd = 24.dp
+                        ),
                         modifier = Modifier
                             .weight(1f)
-                            .height(48.dp)
-                            .testTag("simulator_seek_button"),
-                        border = BorderStroke(1.dp, livingPalette.secondary.copy(alpha = 0.55f)),
-                        shape = RoundedCornerShape(10.dp)
+                            .testTag("simulator_seek_button")
                     ) {
                         Icon(
                             imageVector = Icons.Default.FastForward,
                             contentDescription = null,
-                            tint = livingPalette.secondary
+                            modifier = Modifier.size(18.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text(text = "+15 сек", color = livingPalette.secondary)
+                        Text(
+                            text = "+15 сек",
+                            style = MaterialTheme.typography.labelLarge.withTabularNumbers()
+                        )
                     }
                 }
             }
         }
-    }
-}
-
-fun parseHexColorOrDefault(hex: String, fallback: Color): Color {
-    return try {
-        Color(android.graphics.Color.parseColor(hex))
-    } catch (_: Exception) {
-        fallback
     }
 }
 

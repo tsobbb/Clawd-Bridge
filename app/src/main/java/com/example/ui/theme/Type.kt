@@ -8,78 +8,100 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import com.example.R
 
-val SpaceGroteskFontFamily = FontFamily(
-    Font(R.font.space_grotesk, FontWeight.Normal),
-    Font(R.font.space_grotesk, FontWeight.Medium),
-    Font(R.font.space_grotesk, FontWeight.SemiBold),
-    Font(R.font.space_grotesk, FontWeight.Bold)
+val OnestFontFamily = FontFamily(
+    Font(R.font.onest, FontWeight.Normal),
+    Font(R.font.onest, FontWeight.Medium),
+    Font(R.font.onest, FontWeight.SemiBold),
+    Font(R.font.onest, FontWeight.Bold)
 )
 
 val JetBrainsMonoFontFamily = FontFamily(
     Font(R.font.jetbrains_mono, FontWeight.Normal),
     Font(R.font.jetbrains_mono, FontWeight.Medium),
+    Font(R.font.jetbrains_mono, FontWeight.SemiBold),
     Font(R.font.jetbrains_mono, FontWeight.Bold)
 )
 
+/**
+ * Emphasized Type Scale based on Onest (Cyrillic + Latin) and JetBrains Mono.
+ */
 val Typography = Typography(
-    headlineMedium = TextStyle(
-        fontFamily = SpaceGroteskFontFamily,
+    headlineLarge = TextStyle(
+        fontFamily = OnestFontFamily,
         fontWeight = FontWeight.Bold,
-        fontSize = 24.sp,
-        lineHeight = 30.sp
+        fontSize = 22.sp,
+        lineHeight = 28.sp,
+        letterSpacing = (-0.02).sp
+    ),
+    headlineMedium = TextStyle(
+        fontFamily = OnestFontFamily,
+        fontWeight = FontWeight.Bold,
+        fontSize = 20.sp,
+        lineHeight = 26.sp,
+        letterSpacing = (-0.4).sp // ~ -0.02em at 20sp
     ),
     headlineSmall = TextStyle(
         fontFamily = JetBrainsMonoFontFamily,
         fontWeight = FontWeight.Bold,
-        fontSize = 22.sp,
-        lineHeight = 28.sp
+        fontSize = 20.sp,
+        lineHeight = 26.sp,
+        fontFeatureSettings = "tnum"
     ),
     titleLarge = TextStyle(
-        fontFamily = SpaceGroteskFontFamily,
-        fontWeight = FontWeight.Bold,
-        fontSize = 20.sp,
-        lineHeight = 26.sp
+        fontFamily = OnestFontFamily,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 18.5.sp,
+        lineHeight = 23.sp,
+        letterSpacing = (-0.28).sp // ~ -0.015em at 18.5sp
     ),
     titleMedium = TextStyle(
-        fontFamily = SpaceGroteskFontFamily,
+        fontFamily = OnestFontFamily,
         fontWeight = FontWeight.SemiBold,
-        fontSize = 16.sp,
-        lineHeight = 22.sp
+        fontSize = 15.5.sp,
+        lineHeight = 21.sp
     ),
     titleSmall = TextStyle(
-        fontFamily = SpaceGroteskFontFamily,
-        fontWeight = FontWeight.SemiBold,
+        fontFamily = OnestFontFamily,
+        fontWeight = FontWeight.Medium,
         fontSize = 14.sp,
-        lineHeight = 20.sp
+        lineHeight = 19.sp
     ),
     bodyLarge = TextStyle(
-        fontFamily = SpaceGroteskFontFamily,
+        fontFamily = OnestFontFamily,
         fontWeight = FontWeight.Normal,
         fontSize = 15.sp,
         lineHeight = 22.sp
     ),
     bodyMedium = TextStyle(
-        fontFamily = SpaceGroteskFontFamily,
+        fontFamily = OnestFontFamily,
         fontWeight = FontWeight.Normal,
         fontSize = 14.sp,
         lineHeight = 20.sp
     ),
     bodySmall = TextStyle(
-        fontFamily = SpaceGroteskFontFamily,
+        fontFamily = OnestFontFamily,
         fontWeight = FontWeight.Normal,
-        fontSize = 12.sp,
-        lineHeight = 16.sp
+        fontSize = 12.5.sp,
+        lineHeight = 17.sp
+    ),
+    labelLarge = TextStyle(
+        fontFamily = OnestFontFamily,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 14.sp,
+        lineHeight = 18.sp
     ),
     labelMedium = TextStyle(
-        fontFamily = SpaceGroteskFontFamily,
+        fontFamily = OnestFontFamily,
         fontWeight = FontWeight.Medium,
         fontSize = 12.sp,
         lineHeight = 16.sp
     ),
     labelSmall = TextStyle(
-        fontFamily = SpaceGroteskFontFamily,
+        fontFamily = OnestFontFamily,
         fontWeight = FontWeight.Medium,
         fontSize = 11.sp,
         lineHeight = 14.sp
     )
 )
+
+fun TextStyle.withTabularNumbers(): TextStyle = copy(fontFeatureSettings = "tnum")

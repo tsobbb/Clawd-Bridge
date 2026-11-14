@@ -1,39 +1,40 @@
 package com.example.ui.theme
 
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 
-private val ClawdDarkColorScheme = darkColorScheme(
-    primary = NeonEmerald,
-    onPrimary = Color.Black,
-    primaryContainer = Color(0xFF00381B),
-    onPrimaryContainer = Color(0xFF6BFFAB),
-    secondary = ElectricCyan,
-    onSecondary = Color.Black,
-    secondaryContainer = Color(0xFF004953),
-    onSecondaryContainer = Color(0xFF9CF4FF),
-    tertiary = ElectricViolet,
-    onTertiary = Color.Black,
-    background = DarkBackground,
+private val ClawdGlassColorScheme = darkColorScheme(
+    primary = MintCta,
+    onPrimary = MintCtaContent,
+    primaryContainer = Color(0xFF132E24),
+    onPrimaryContainer = MintCta,
+    secondary = SecondaryGlassText,
+    onSecondary = Color(0xFF101217),
+    secondaryContainer = Color(0xFF1F232C),
+    onSecondaryContainer = TextPrimary,
+    tertiary = SemanticEmerald,
+    onTertiary = MintCtaContent,
+    background = BaseCanvas,
     onBackground = TextPrimary,
-    surface = DarkSurface,
+    surface = Color(0xFF12141A),
     onSurface = TextPrimary,
-    surfaceVariant = DarkSurfaceVariant,
-    onSurfaceVariant = TextSecondary,
-    error = CoralRed,
-    onError = Color.White
+    surfaceVariant = Color(0xFF1A1D25),
+    onSurfaceVariant = TextMuted,
+    outline = SpecularStroke,
+    outlineVariant = HairlineDivider,
+    error = SemanticCoral,
+    onError = Color(0xFF280808)
 )
 
 @Composable
 fun ClawdBridgeTheme(
-    darkTheme: Boolean = true, // Default to sleek audio console dark theme
+    darkTheme: Boolean = true,
     content: @Composable () -> Unit
 ) {
     MaterialTheme(
-        colorScheme = ClawdDarkColorScheme,
+        colorScheme = ClawdGlassColorScheme,
         typography = Typography,
         content = content
     )
