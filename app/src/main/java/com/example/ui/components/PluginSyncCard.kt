@@ -405,7 +405,7 @@ fun PluginSyncCard(
                     if (isBusy) {
                         WaveLoadingDots(
                             color = MintCtaContent,
-                            phase = livingPalette.phase,
+                            timeSecondsState = livingPalette.uiTimeSecondsState,
                             modifier = Modifier.size(width = 24.dp, height = 16.dp)
                         )
                         Spacer(modifier = Modifier.width(10.dp))

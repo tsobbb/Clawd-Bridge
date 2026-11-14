@@ -1,6 +1,7 @@
 package com.example.state
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.media.MediaMetadata
 import android.media.session.MediaController
@@ -123,6 +124,9 @@ object MediaBridgeStateHolder {
     private val requestCounter = AtomicLong(0L)
     private val lastPushedSignature = AtomicReference<String>("")
 
+    @Volatile
+    private var prefsChangeListener: SharedPreferences.OnSharedPreferenceChangeListener? = null
+
     fun init(context: Context) {
         if (appContext == null) {
             val ctx = context.applicationContext
@@ -131,6 +135,21 @@ object MediaBridgeStateHolder {
             _syncOffsetMs.value = sp.getInt(KEY_SYNC_OFFSET_MS, 0)
                 .coerceIn(MIN_SYNC_OFFSET_MS, MAX_SYNC_OFFSET_MS)
             _dynamicBackgroundEnabled.value = sp.getBoolean(KEY_DYNAMIC_BACKGROUND_ENABLED, true)
+
+            val listener = SharedPreferences.OnSharedPreferenceChangeListener { prefs, key ->
+                when (key) {
+                    KEY_DYNAMIC_BACKGROUND_ENABLED -> {
+                        _dynamicBackgroundEnabled.value =
+                            prefs.getBoolean(KEY_DYNAMIC_BACKGROUND_ENABLED, true)
+                    }
+                    KEY_SYNC_OFFSET_MS -> {
+                        _syncOffsetMs.value = prefs.getInt(KEY_SYNC_OFFSET_MS, 0)
+                            .coerceIn(MIN_SYNC_OFFSET_MS, MAX_SYNC_OFFSET_MS)
+                    }
+                }
+            }
+            prefsChangeListener = listener
+            sp.registerOnSharedPreferenceChangeListener(listener)
         }
     }
 

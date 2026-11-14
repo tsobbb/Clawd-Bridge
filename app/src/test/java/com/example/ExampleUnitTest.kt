@@ -397,6 +397,43 @@ class ExampleUnitTest {
         )
         assertFalse(downgradeEval.isUpdateAvailable)
     }
+
+    @Test
+    fun `verify 4-cloud normalization keeps dark covers glowing 0_35-0_55 and monochrome cool silver`() {
+        val darkCrimsonCloud = com.example.ui.theme.ContrastGuard.normalizeAmbientCloudRgb(0x3A0A14)
+        val crimsonHsl = com.example.ui.theme.ContrastGuard.rgbToHsl(darkCrimsonCloud)
+        assertTrue("Dark cover cloud Lightness must be in 0.35..0.55 (was ${crimsonHsl.l})", crimsonHsl.l in 0.34f..0.56f)
+
+        val monoClouds = com.example.ui.theme.computeCloudPalette(
+            isTrackActive = true,
+            accentColorHex = "#F4F4F5",
+            accentColorsHex = listOf("#52525B", "#A1A1AA", "#F4F4F5")
+        )
+        assertEquals(4, monoClouds.size)
+        monoClouds.forEach { color ->
+            val rgb = ((color.red * 255f).toInt() shl 16) or ((color.green * 255f).toInt() shl 8) or (color.blue * 255f).toInt()
+            val hsl = com.example.ui.theme.ContrastGuard.rgbToHsl(rgb)
+            assertTrue("Monochrome clouds must stay cool silver-graphite, not saturated brown/purple (s=${hsl.s})", hsl.s <= 0.20f)
+        }
+
+        val idleClouds = com.example.ui.theme.computeCloudPalette(
+            isTrackActive = false,
+            accentColorHex = "#34D399",
+            accentColorsHex = emptyList()
+        )
+        assertEquals(4, idleClouds.size)
+    }
+
+    @Test
+    fun `verify SmartColorExtractor avoids turning off-white cream covers into muddy brown`() {
+        // Off-white cream paper (#F0E6DA) + black artwork (#121212)
+        val pixels = IntArray(32 * 32) { idx ->
+            if (idx % 6 == 0) 0xFF121212.toInt() else 0xFFF0E6DA.toInt()
+        }
+        val result = com.example.media.SmartColorExtractor.extractFromPixels(pixels, 32, 32)
+        assertTrue("Pale cream + black ink cover must avoid muddy brown saturation", result.isMonochrome)
+    }
 }
+
 
 

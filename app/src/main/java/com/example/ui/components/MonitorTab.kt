@@ -3,14 +3,11 @@ package com.example.ui.components
 import android.content.Intent
 import android.graphics.Bitmap
 import android.os.Build
+import android.os.SystemClock
 import android.provider.Settings
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
@@ -51,6 +48,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -102,8 +100,11 @@ import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import com.example.ui.theme.withTabularNumbers
 import com.example.util.AppMetadataResolver
+import kotlinx.coroutines.isActive
 import java.util.Locale
 import kotlin.math.PI
+import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.sin
 
 @Composable
@@ -130,6 +131,7 @@ fun MonitorTab(
         ServiceStatusBanner(
             isServiceConnected = isServiceConnected,
             isNotificationAccessGranted = isNotificationAccessGranted,
+            timeSecondsState = livingPalette.uiTimeSecondsState,
             onForceRebind = onForceRebind,
             onOpenSettings = {
                 context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
@@ -164,6 +166,7 @@ private data class StatusBannerInfo(
 fun ServiceStatusBanner(
     isServiceConnected: Boolean,
     isNotificationAccessGranted: Boolean,
+    timeSecondsState: State<Float>,
     onForceRebind: () -> Unit,
     onOpenSettings: () -> Unit
 ) {
@@ -187,17 +190,6 @@ fun ServiceStatusBanner(
             icon = Icons.Default.ErrorOutline
         )
     }
-
-    val pulseTransition = rememberInfiniteTransition(label = "status_icon_pulse")
-    val pulseAlpha by pulseTransition.animateFloat(
-        initialValue = 0.65f,
-        targetValue = 1.0f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1800, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "status_pulse_alpha"
-    )
 
     FrostedGlassCard(
         modifier = Modifier
@@ -228,8 +220,16 @@ fun ServiceStatusBanner(
                 Icon(
                     imageVector = info.icon,
                     contentDescription = info.title,
-                    tint = info.tint.copy(alpha = if (isServiceConnected) pulseAlpha else 1f),
-                    modifier = Modifier.size(21.dp)
+                    tint = info.tint,
+                    modifier = Modifier
+                        .size(21.dp)
+                        .graphicsLayer {
+                            alpha = if (isServiceConnected) {
+                                0.65f + 0.35f * ((sin(timeSecondsState.value * 3.2f) + 1f) * 0.5f)
+                            } else {
+                                1f
+                            }
+                        }
                 )
             }
 
@@ -396,6 +396,7 @@ private fun HeroLiveMonitorCard(
                         MiniEqualizerBars(
                             isPlaying = isPlaying,
                             color = if (isPlaying) playerAccent else TextDim,
+                            timeSecondsState = livingPalette.uiTimeSecondsState,
                             modifier = Modifier.size(width = 16.dp, height = 14.dp)
                         )
                         Text(
@@ -694,37 +695,40 @@ private fun HeroLiveMonitorCard(
 private fun MiniEqualizerBars(
     isPlaying: Boolean,
     color: Color,
+    timeSecondsState: State<Float>,
     modifier: Modifier = Modifier
 ) {
-    val transition = rememberInfiniteTransition(label = "mini_eq")
-    val bar1 by transition.animateFloat(
-        initialValue = 0.25f,
-        targetValue = 0.95f,
-        animationSpec = infiniteRepeatable(tween(420), RepeatMode.Reverse),
-        label = "eq_b1"
-    )
-    val bar2 by transition.animateFloat(
-        initialValue = 0.90f,
-        targetValue = 0.30f,
-        animationSpec = infiniteRepeatable(tween(530), RepeatMode.Reverse),
-        label = "eq_b2"
-    )
-    val bar3 by transition.animateFloat(
-        initialValue = 0.35f,
-        targetValue = 0.88f,
-        animationSpec = infiniteRepeatable(tween(370), RepeatMode.Reverse),
-        label = "eq_b3"
-    )
-    val activeFactor by animateFloatAsState(
-        targetValue = if (isPlaying) 1f else 0f,
-        animationSpec = tween(280),
-        label = "eq_active"
-    )
+    val activeFactorState = remember { mutableFloatStateOf(if (isPlaying) 1f else 0f) }
+    LaunchedEffect(isPlaying) {
+        val start = activeFactorState.floatValue
+        val target = if (isPlaying) 1f else 0f
+        if (abs(start - target) < 0.001f) {
+            activeFactorState.floatValue = target
+            return@LaunchedEffect
+        }
+        val startMs = SystemClock.uptimeMillis()
+        while (isActive) {
+            var done = false
+            withFrameNanos {
+                val rawT = ((SystemClock.uptimeMillis() - startMs).coerceAtLeast(0L) / 280f).coerceIn(0f, 1f)
+                val eased = FastOutSlowInEasing.transform(rawT)
+                activeFactorState.floatValue = start + (target - start) * eased
+                if (rawT >= 1f) done = true
+            }
+            if (done) break
+        }
+        activeFactorState.floatValue = target
+    }
 
     Canvas(modifier = modifier) {
+        val t = timeSecondsState.value
+        val activeFactor = activeFactorState.floatValue
         val w = size.width
         val h = size.height
         val barWidth = w / 5f
+        val bar1 = 0.25f + 0.70f * ((sin(t * 7.2f) + 1f) * 0.5f)
+        val bar2 = 0.25f + 0.70f * ((cos(t * 5.9f + 1.3f) + 1f) * 0.5f)
+        val bar3 = 0.25f + 0.70f * ((sin(t * 8.4f + 2.6f) + 1f) * 0.5f)
         val heights = listOf(bar1, bar2, bar3).map { dynamic ->
             val rest = 0.24f
             h * (rest + (dynamic - rest) * activeFactor)
@@ -748,28 +752,47 @@ private fun WavyPlaybackProgressBar(
     activeColor: Color,
     modifier: Modifier = Modifier
 ) {
-    val amplitudeMultiplier by animateFloatAsState(
-        targetValue = if (isPlaying) 1f else 0f,
-        animationSpec = tween(durationMillis = 360, easing = FastOutSlowInEasing),
-        label = "wave_amp"
-    )
+    val ampState = remember { mutableFloatStateOf(if (isPlaying) 1f else 0f) }
+    LaunchedEffect(isPlaying) {
+        val start = ampState.floatValue
+        val target = if (isPlaying) 1f else 0f
+        if (abs(start - target) < 0.001f) {
+            ampState.floatValue = target
+            return@LaunchedEffect
+        }
+        val startMs = SystemClock.uptimeMillis()
+        while (isActive) {
+            var done = false
+            withFrameNanos {
+                val rawT = ((SystemClock.uptimeMillis() - startMs).coerceAtLeast(0L) / 360f).coerceIn(0f, 1f)
+                val eased = FastOutSlowInEasing.transform(rawT)
+                ampState.floatValue = start + (target - start) * eased
+                if (rawT >= 1f) done = true
+            }
+            if (done) break
+        }
+        ampState.floatValue = target
+    }
 
-    var wavePhase by remember { mutableFloatStateOf(0f) }
+    val wavePhaseState = remember { mutableFloatStateOf(0f) }
     LaunchedEffect(isPlaying) {
         if (!isPlaying) return@LaunchedEffect
-        var lastNanos = 0L
-        while (true) {
-            withFrameNanos { nanos ->
-                if (lastNanos != 0L) {
-                    val dt = ((nanos - lastNanos).coerceIn(0L, 100_000_000L)) / 1_000_000_000f
-                    wavePhase = (wavePhase + dt * 4.5f) % (2f * PI.toFloat())
+        var lastUptimeMs = SystemClock.uptimeMillis()
+        while (isActive) {
+            withFrameNanos {
+                val nowMs = SystemClock.uptimeMillis()
+                val dt = ((nowMs - lastUptimeMs).coerceIn(0L, 100L)) / 1000f
+                lastUptimeMs = nowMs
+                if (dt > 0f) {
+                    wavePhaseState.floatValue = (wavePhaseState.floatValue + dt * 4.5f) % (2f * PI.toFloat())
                 }
-                lastNanos = nanos
             }
         }
     }
 
     Canvas(modifier = modifier) {
+        val amplitudeMultiplier = ampState.floatValue
+        val wavePhase = wavePhaseState.floatValue
         val cy = size.height / 2f
         val width = size.width
         val clampedFraction = fraction.coerceIn(0f, 1f)

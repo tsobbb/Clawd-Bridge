@@ -17,11 +17,6 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.Crossfade
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -61,6 +56,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -115,6 +111,7 @@ import com.example.ui.theme.withTabularNumbers
 import com.example.updater.BridgeAppUpdater
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlin.math.sin
 
 private data class BridgeNavTab(
     val index: Int,
@@ -264,6 +261,7 @@ fun ClawdBridgeMainApp() {
             topBar = {
                 BridgeTopAppBar(
                     isServerRunning = isServerRunning,
+                    timeSecondsState = livingPalette.uiTimeSecondsState,
                     onCopyEndpoint = {
                         val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                         cm.setPrimaryClip(ClipData.newPlainText("Clawd Bridge Server", "http://127.0.0.1:44444"))
@@ -365,20 +363,10 @@ fun ClawdBridgeMainApp() {
 @Composable
 private fun BridgeTopAppBar(
     isServerRunning: Boolean,
+    timeSecondsState: State<Float>,
     onCopyEndpoint: () -> Unit,
     onRestartServer: () -> Unit
 ) {
-    val dotTransition = rememberInfiniteTransition(label = "server_dot_breath")
-    val dotAlpha by dotTransition.animateFloat(
-        initialValue = 0.55f,
-        targetValue = 1.0f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1600, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "server_dot_alpha"
-    )
-
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -419,11 +407,15 @@ private fun BridgeTopAppBar(
                 Box(
                     modifier = Modifier
                         .size(8.dp)
+                        .graphicsLayer {
+                            alpha = if (isServerRunning) {
+                                0.55f + 0.45f * ((sin(timeSecondsState.value * 3.6f) + 1f) * 0.5f)
+                            } else {
+                                1f
+                            }
+                        }
                         .clip(CircleShape)
-                        .background(
-                            if (isServerRunning) SemanticEmerald.copy(alpha = dotAlpha)
-                            else SemanticCoral
-                        )
+                        .background(if (isServerRunning) SemanticEmerald else SemanticCoral)
                 )
                 Text(
                     text = if (isServerRunning) "44444" else "OFFLINE",

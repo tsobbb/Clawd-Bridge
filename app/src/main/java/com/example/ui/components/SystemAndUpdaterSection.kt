@@ -464,7 +464,7 @@ private fun BridgeUpdaterBlock(
                 is BridgeUpdateState.Checking -> {
                     WaveLoadingDots(
                         color = MintCta,
-                        phase = livingPalette.phase,
+                        timeSecondsState = livingPalette.uiTimeSecondsState,
                         modifier = Modifier.size(width = 24.dp, height = 14.dp)
                     )
                 }
@@ -623,7 +623,7 @@ private fun BridgeUpdaterBlock(
             ) {
                 WaveLoadingDots(
                     color = MintCta,
-                    phase = livingPalette.phase,
+                    timeSecondsState = livingPalette.uiTimeSecondsState,
                     modifier = Modifier.size(width = 22.dp, height = 14.dp)
                 )
                 Text(

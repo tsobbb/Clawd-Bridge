@@ -20,6 +20,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
@@ -200,16 +201,17 @@ fun ExpressiveGlassSwitch(
 @Composable
 fun WaveLoadingDots(
     color: Color,
-    phase: Float,
+    timeSecondsState: State<Float>,
     modifier: Modifier = Modifier
 ) {
     Canvas(modifier = modifier) {
+        val t = timeSecondsState.value
         val barCount = 4
         val barWidth = size.width / (barCount * 2f)
         val gap = (size.width - barCount * barWidth) / (barCount - 1).coerceAtLeast(1)
         val centerY = size.height / 2f
         for (i in 0 until barCount) {
-            val wave = 0.35f + 0.65f * ((sin((phase * 2.0 * PI * 8.0) + i * 1.1) + 1.0) / 2.0).toFloat()
+            val wave = 0.35f + 0.65f * ((sin(t * 5.2f + i * 1.1f) + 1f) * 0.5f)
             val h = size.height * wave
             val x = i * (barWidth + gap)
             drawRoundRect(

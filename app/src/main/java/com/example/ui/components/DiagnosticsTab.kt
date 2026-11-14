@@ -541,7 +541,7 @@ private fun HttpServerDiagnosticsCard(
                     if (isTestingApi) {
                         WaveLoadingDots(
                             color = SecondaryGlassText,
-                            phase = livingPalette.phase,
+                            timeSecondsState = livingPalette.uiTimeSecondsState,
                             modifier = Modifier.size(width = 20.dp, height = 14.dp)
                         )
                     } else {

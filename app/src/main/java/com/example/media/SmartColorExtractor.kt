@@ -126,14 +126,19 @@ object SmartColorExtractor {
             qCount[qIdx]++
 
             totalOpaque++
+            val maxC = max(r / 255f, max(g / 255f, b / 255f))
+            val minC = min(r / 255f, min(g / 255f, b / 255f))
+            val chroma = maxC - minC
             val hsl = rgbToHsl(rgb)
             if (hsl.l < 0.24f) darkPixelCount++
             if (hsl.l > 0.72f) lightPixelCount++
 
-            if (hsl.s > 0.16f && hsl.l in 0.10f..0.90f) {
+            // Ignore near-white / pale cream background paper (high lightness, low chroma) so it doesn't turn brown
+            val isRealColorful = chroma > 0.14f && hsl.s > 0.18f && hsl.l in 0.08f..0.88f
+            if (isRealColorful) {
                 colorfulCount++
                 val bin = ((hsl.h / (360f / binCount)).toInt()).coerceIn(0, binCount - 1)
-                val weight = (hsl.s * hsl.s * 4.0f + 0.20f) * (1.0f - abs(hsl.l - 0.50f) * 0.45f)
+                val weight = (hsl.s * hsl.s * 3.5f + chroma * 1.8f + 0.15f) * (1.0f - abs(hsl.l - 0.50f) * 0.40f)
                 val rad = hsl.h * (PI.toFloat() / 180f)
                 binWeight[bin] += weight
                 binSin[bin] += sin(rad) * weight
@@ -169,8 +174,8 @@ object SmartColorExtractor {
             .filter { binWeight[it] > 0f && binCountPixels[it] > 0 }
             .sortedByDescending { binWeight[it] }
 
-        // Section 3.1: Monochrome / B&W cover (< 8% colorful pixels) -> pure graphite/silver/lunar white
-        if (colorfulRatio < 0.08f || rankedBins.isEmpty()) {
+        // Monochrome / B&W / white-paper cover (< 4.5% genuinely colorful pixels) -> pure graphite/silver/lunar white
+        if (colorfulRatio < 0.045f || rankedBins.isEmpty()) {
             return SmartPaletteResult(
                 isMonochrome = true,
                 playerAccentRgb = MONOCHROME_ACCENT_RGB,
