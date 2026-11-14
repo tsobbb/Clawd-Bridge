@@ -325,5 +325,78 @@ class ExampleUnitTest {
         assertEquals(0f, com.example.ui.components.waveEnvelopeFactor(300f, 300f, minWave, endFade), 1e-4f)
         assertEquals(1f, com.example.ui.components.waveEnvelopeFactor(150f, 300f, minWave, endFade), 1e-4f)
     }
+
+    @Test
+    fun `verify BridgeAppUpdater computes Git Blob SHA-1 and detects changed main APK size or sha`() {
+        val tmp = java.io.File.createTempFile("git_blob_test", ".bin")
+        try {
+            tmp.writeText("hello world\n", Charsets.UTF_8)
+            assertEquals("3b18e512dba79e4c8300dd08aeb37f8e728b8dad", com.example.updater.BridgeAppUpdater.computeGitBlobSha1(tmp))
+        } finally {
+            tmp.delete()
+        }
+
+        // Same versionCode, different APK size -> detected as new build
+        val changedSizeEval = com.example.updater.BridgeAppUpdater.evaluateMainBranchUpdate(
+            remoteCode = 2,
+            remoteName = "2.2.0",
+            remoteSize = 18_000_000L,
+            remoteSha = "aaaa1111",
+            currentVersionCode = 2,
+            currentVersionName = "2.2.0",
+            localSize = 17_200_000L,
+            localGitSha = "bbbb2222",
+            lastInstalledSha = null,
+            lastInstalledVersionCode = -1
+        )
+        assertTrue(changedSizeEval.isUpdateAvailable)
+        assertTrue(changedSizeEval.matchedByArtifactDiff)
+
+        // Same versionCode, matching size AND sha -> up to date
+        val sameEval = com.example.updater.BridgeAppUpdater.evaluateMainBranchUpdate(
+            remoteCode = 2,
+            remoteName = "2.2.0",
+            remoteSize = 17_200_000L,
+            remoteSha = "bbbb2222",
+            currentVersionCode = 2,
+            currentVersionName = "2.2.0",
+            localSize = 17_200_000L,
+            localGitSha = "bbbb2222",
+            lastInstalledSha = null,
+            lastInstalledVersionCode = -1
+        )
+        assertFalse(sameEval.isUpdateAvailable)
+
+        // Same versionCode, just installed via updater (saved SHA matches) -> up to date
+        val installedPrefEval = com.example.updater.BridgeAppUpdater.evaluateMainBranchUpdate(
+            remoteCode = 2,
+            remoteName = "2.2.0",
+            remoteSize = 18_000_000L,
+            remoteSha = "aaaa1111",
+            currentVersionCode = 2,
+            currentVersionName = "2.2.0",
+            localSize = 17_200_000L,
+            localGitSha = "bbbb2222",
+            lastInstalledSha = "aaaa1111",
+            lastInstalledVersionCode = 2
+        )
+        assertFalse(installedPrefEval.isUpdateAvailable)
+
+        // Remote older versionCode -> never downgrade
+        val downgradeEval = com.example.updater.BridgeAppUpdater.evaluateMainBranchUpdate(
+            remoteCode = 1,
+            remoteName = "2.1.0",
+            remoteSize = 16_000_000L,
+            remoteSha = "cccc3333",
+            currentVersionCode = 2,
+            currentVersionName = "2.2.0",
+            localSize = 17_200_000L,
+            localGitSha = "bbbb2222",
+            lastInstalledSha = null,
+            lastInstalledVersionCode = -1
+        )
+        assertFalse(downgradeEval.isUpdateAvailable)
+    }
 }
+
 

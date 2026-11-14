@@ -26,6 +26,7 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.security.MessageDigest
 import java.util.Locale
 
 data class RemoteApkRelease(
@@ -35,7 +36,9 @@ data class RemoteApkRelease(
     val apkName: String,
     val downloadUrl: String,
     val sizeBytes: Long,
-    val isUpdateAvailable: Boolean
+    val remoteSha: String = "",
+    val isUpdateAvailable: Boolean,
+    val isRebuildWithSameVersion: Boolean = false
 )
 
 sealed class BridgeUpdateState {
@@ -73,6 +76,10 @@ object BridgeAppUpdater {
     const val REPO_URL = "https://github.com/$REPO_OWNER/$REPO_NAME"
     private const val DEFAULT_APK_NAME = "ClawdBridge.apk"
     private const val UPDATES_SUBDIR = "updates"
+    private const val PREFS_NAME = "clawd_updater_prefs"
+    private const val KEY_PENDING_SHA = "pending_install_sha"
+    private const val KEY_INSTALLED_SHA = "last_installed_sha"
+    private const val KEY_INSTALLED_VER_CODE = "last_installed_version_code"
 
     private val ioScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var activeJob: Job? = null
@@ -93,9 +100,18 @@ object BridgeAppUpdater {
             _state.value = BridgeUpdateState.Checking
             try {
                 val token = PluginDownloader.getSavedToken(appCtx)
+                val localFingerprint = readLocalApkFingerprint(appCtx)
+                val prefs = appCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                val lastInstalledSha = prefs.getString(KEY_INSTALLED_SHA, null)
+                val lastInstalledVerCode = prefs.getInt(KEY_INSTALLED_VER_CODE, -1)
+
                 val release = fetchLatestBridgeRelease(
                     currentVersionCode = BuildConfig.VERSION_CODE,
                     currentVersionName = BuildConfig.VERSION_NAME,
+                    localSize = localFingerprint.sizeBytes,
+                    localGitSha = localFingerprint.gitBlobSha,
+                    lastInstalledSha = lastInstalledSha,
+                    lastInstalledVersionCode = lastInstalledVerCode,
                     githubToken = token
                 )
                 if (release == null) {
@@ -189,12 +205,37 @@ object BridgeAppUpdater {
         _state.value = BridgeUpdateState.Installing("Ожидание подтверждения системы...")
     }
 
-    internal fun onInstallSucceeded() {
+    internal fun onInstallSucceeded(context: Context? = null) {
+        context?.applicationContext?.let { markPendingInstallCompleted(it) }
         _state.value = BridgeUpdateState.Installed
+    }
+
+    internal fun onPackageReplaced(context: Context) {
+        markPendingInstallCompleted(context.applicationContext)
     }
 
     internal fun onInstallFailed(message: String) {
         _state.value = BridgeUpdateState.Error(message)
+    }
+
+    private fun savePendingInstallSha(context: Context, sha: String) {
+        if (sha.isBlank()) return
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_PENDING_SHA, sha)
+            .apply()
+    }
+
+    private fun markPendingInstallCompleted(context: Context) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val pending = prefs.getString(KEY_PENDING_SHA, null)
+        if (!pending.isNullOrBlank()) {
+            prefs.edit()
+                .putString(KEY_INSTALLED_SHA, pending)
+                .putInt(KEY_INSTALLED_VER_CODE, BuildConfig.VERSION_CODE)
+                .remove(KEY_PENDING_SHA)
+                .apply()
+        }
     }
 
     private suspend fun installDownloadedApk(
@@ -210,6 +251,9 @@ object BridgeAppUpdater {
         _state.value = BridgeUpdateState.Installing("Подготовка сессии PackageInstaller...")
         withContext(Dispatchers.IO) {
             val appCtx = context.applicationContext
+            val effectiveSha = release.remoteSha.ifBlank { computeGitBlobSha1(apkFile).orEmpty() }
+            savePendingInstallSha(appCtx, effectiveSha)
+
             val packageInstaller = appCtx.packageManager.packageInstaller
             val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {
                 setSize(apkFile.length())
@@ -258,23 +302,41 @@ object BridgeAppUpdater {
     private suspend fun fetchLatestBridgeRelease(
         currentVersionCode: Int,
         currentVersionName: String,
+        localSize: Long,
+        localGitSha: String?,
+        lastInstalledSha: String?,
+        lastInstalledVersionCode: Int,
         githubToken: String
     ): RemoteApkRelease? = withContext(Dispatchers.IO) {
         // Step 1: Check GitHub Releases /latest (filter strictly for .apk, compare semver with VERSION_NAME)
-        val releaseCandidate = tryFetchFromReleasesLatest(currentVersionName, githubToken)
+        val releaseCandidate = tryFetchFromReleasesLatest(
+            currentVersionName = currentVersionName,
+            localSize = localSize,
+            token = githubToken
+        )
         if (releaseCandidate != null) {
             return@withContext releaseCandidate
         }
 
-        // Step 2: Fallback to main branch (version.json -> app/build.gradle.kts + /contents for APK)
-        tryFetchFromMainBranch(currentVersionCode, currentVersionName, githubToken)
+        // Step 2: Fallback to main branch (version.json -> app/build.gradle.kts + /contents for APK size & git blob sha)
+        tryFetchFromMainBranch(
+            currentVersionCode = currentVersionCode,
+            currentVersionName = currentVersionName,
+            localSize = localSize,
+            localGitSha = localGitSha,
+            lastInstalledSha = lastInstalledSha,
+            lastInstalledVersionCode = lastInstalledVersionCode,
+            token = githubToken
+        )
     }
 
     private fun tryFetchFromReleasesLatest(
         currentVersionName: String,
+        localSize: Long,
         token: String
     ): RemoteApkRelease? {
-        val url = "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases/latest"
+        val cacheBust = System.currentTimeMillis()
+        val url = "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases/latest?_=$cacheBust"
         val body = httpGetText(url, token = token, acceptJson = true, noCache = true) ?: return null
         val json = runCatching { JSONObject(body) }.getOrNull() ?: return null
         val tagName = json.optString("tag_name").trim()
@@ -301,10 +363,15 @@ object BridgeAppUpdater {
 
         // Nuance #3: Releases API has tag_name semver (no integer versionCode) -> compare semver vs VERSION_NAME
         val cleanRemoteVer = normalizeVersionLabel(tagName)
-        val isNewer = if (cleanRemoteVer.isNotBlank()) {
-            compareSemver(cleanRemoteVer, currentVersionName) > 0
-        } else {
-            true
+        val semverCmp = if (cleanRemoteVer.isNotBlank()) {
+            compareSemver(cleanRemoteVer, currentVersionName)
+        } else 0
+        val sizeRebuild = semverCmp == 0 && bestSize > 0L && localSize > 0L && bestSize != localSize
+        val isNewer = when {
+            cleanRemoteVer.isBlank() -> true
+            semverCmp > 0 -> true
+            sizeRebuild -> true
+            else -> false
         }
 
         return RemoteApkRelease(
@@ -314,13 +381,19 @@ object BridgeAppUpdater {
             apkName = bestApkName,
             downloadUrl = bestUrl,
             sizeBytes = bestSize,
-            isUpdateAvailable = isNewer
+            remoteSha = "",
+            isUpdateAvailable = isNewer,
+            isRebuildWithSameVersion = sizeRebuild
         )
     }
 
     private fun tryFetchFromMainBranch(
         currentVersionCode: Int,
         currentVersionName: String,
+        localSize: Long,
+        localGitSha: String?,
+        lastInstalledSha: String?,
+        lastInstalledVersionCode: Int,
         token: String
     ): RemoteApkRelease? {
         val cacheBust = System.currentTimeMillis()
@@ -340,56 +413,74 @@ object BridgeAppUpdater {
 
         val targetApkName = parsedMeta?.apkName?.ifBlank { DEFAULT_APK_NAME } ?: DEFAULT_APK_NAME
 
-        // Probe root /contents?ref=main to find actual .apk metadata & size
-        val contentsRootUrl = "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/contents?ref=main"
-        val contentsText = httpGetText(contentsRootUrl, token = token, acceptJson = true, noCache = true)
         var foundApkName = targetApkName
-        var foundDownloadUrl = "https://github.com/$REPO_OWNER/$REPO_NAME/raw/main/$targetApkName"
+        var foundDownloadUrl = "https://raw.githubusercontent.com/$REPO_OWNER/$REPO_NAME/main/$targetApkName?t=$cacheBust"
         var foundSize = -1L
+        var foundSha = ""
 
-        if (contentsText != null) {
+        // Step A: Direct GitHub Contents API check on exact targetApkName (returns exact size + git blob sha)
+        val singleContentUrl = "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/contents/$targetApkName?ref=main&_=$cacheBust"
+        httpGetText(singleContentUrl, token = token, acceptJson = true, noCache = true)?.let { body ->
             runCatching {
-                val arr = JSONArray(contentsText)
-                val apkCandidates = mutableListOf<JSONObject>()
-                for (i in 0 until arr.length()) {
-                    val item = arr.optJSONObject(i) ?: continue
-                    val name = item.optString("name")
-                    if (item.optString("type") == "file" && name.lowercase(Locale.US).endsWith(".apk")) {
-                        apkCandidates.add(item)
-                    }
-                }
-                val chosen = apkCandidates.firstOrNull { it.optString("name").equals(targetApkName, ignoreCase = true) }
-                    ?: apkCandidates.firstOrNull { it.optString("name").contains("clawd", ignoreCase = true) }
-                    ?: apkCandidates.firstOrNull()
-                if (chosen != null) {
-                    foundApkName = chosen.optString("name", targetApkName)
-                    val dl = chosen.optString("download_url")
-                    if (dl.isNotBlank()) foundDownloadUrl = dl
-                    foundSize = chosen.optLong("size", -1L)
+                val obj = JSONObject(body)
+                if (obj.optString("type") == "file") {
+                    foundApkName = obj.optString("name", targetApkName)
+                    foundSize = obj.optLong("size", -1L)
+                    foundSha = obj.optString("sha", "").trim()
+                    val dl = obj.optString("download_url")
+                    if (dl.isNotBlank()) foundDownloadUrl = appendCacheBusterIfSafe(dl, cacheBust)
                 }
             }
         }
 
-        // If /contents failed or APK size unknown, try single file contents API
+        // Step B: Fallback to root /contents?ref=main if exact filename wasn't matched
         if (foundSize <= 0L) {
-            val singleContentUrl = "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/contents/$foundApkName?ref=main"
-            httpGetText(singleContentUrl, token = token, acceptJson = true, noCache = true)?.let { body ->
+            val contentsRootUrl = "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/contents?ref=main&_=$cacheBust"
+            val contentsText = httpGetText(contentsRootUrl, token = token, acceptJson = true, noCache = true)
+            if (contentsText != null) {
                 runCatching {
-                    val obj = JSONObject(body)
-                    foundSize = obj.optLong("size", foundSize)
-                    val dl = obj.optString("download_url")
-                    if (dl.isNotBlank()) foundDownloadUrl = dl
+                    val arr = JSONArray(contentsText)
+                    val apkCandidates = mutableListOf<JSONObject>()
+                    for (i in 0 until arr.length()) {
+                        val item = arr.optJSONObject(i) ?: continue
+                        val name = item.optString("name")
+                        if (item.optString("type") == "file" && name.lowercase(Locale.US).endsWith(".apk")) {
+                            apkCandidates.add(item)
+                        }
+                    }
+                    val chosen = apkCandidates.firstOrNull { it.optString("name").equals(targetApkName, ignoreCase = true) }
+                        ?: apkCandidates.firstOrNull { it.optString("name").contains("clawd", ignoreCase = true) }
+                        ?: apkCandidates.firstOrNull()
+                    if (chosen != null) {
+                        foundApkName = chosen.optString("name", targetApkName)
+                        val dl = chosen.optString("download_url")
+                        if (dl.isNotBlank()) foundDownloadUrl = appendCacheBusterIfSafe(dl, cacheBust)
+                        foundSize = chosen.optLong("size", -1L)
+                        foundSha = chosen.optString("sha", "").trim()
+                    }
                 }
             }
         }
 
         val remoteCode = parsedMeta?.versionCode
         val remoteName = parsedMeta?.versionName?.let(::normalizeVersionLabel) ?: ""
-        val isNewer = when {
-            remoteCode != null && remoteCode != currentVersionCode -> remoteCode > currentVersionCode
-            remoteName.isNotBlank() -> compareSemver(remoteName, currentVersionName) > 0
-            else -> true
+
+        if (remoteCode == null && remoteName.isBlank() && foundSize <= 0L) {
+            return null
         }
+
+        val evaluation = evaluateMainBranchUpdate(
+            remoteCode = remoteCode,
+            remoteName = remoteName,
+            remoteSize = foundSize,
+            remoteSha = foundSha,
+            currentVersionCode = currentVersionCode,
+            currentVersionName = currentVersionName,
+            localSize = localSize,
+            localGitSha = localGitSha,
+            lastInstalledSha = lastInstalledSha,
+            lastInstalledVersionCode = lastInstalledVersionCode
+        )
 
         return RemoteApkRelease(
             sourceLabel = "Ветка main",
@@ -398,8 +489,28 @@ object BridgeAppUpdater {
             apkName = foundApkName,
             downloadUrl = foundDownloadUrl,
             sizeBytes = foundSize,
-            isUpdateAvailable = isNewer
+            remoteSha = foundSha,
+            isUpdateAvailable = evaluation.isUpdateAvailable,
+            isRebuildWithSameVersion = evaluation.matchedByArtifactDiff
         )
+    }
+
+    private fun appendCacheBusterIfSafe(url: String, ts: Long): String {
+        if (url.contains("token=", ignoreCase = true) || url.contains("Signature=", ignoreCase = true)) {
+            return url
+        }
+        val sep = if (url.contains('?')) '&' else '?'
+        return "${url}${sep}t=$ts"
+    }
+
+    private fun readLocalApkFingerprint(context: Context): LocalApkFingerprint {
+        val sourcePath = runCatching { context.applicationInfo.sourceDir }.getOrNull().orEmpty()
+        if (sourcePath.isBlank()) return LocalApkFingerprint(-1L, null)
+        val file = File(sourcePath)
+        if (!file.exists()) return LocalApkFingerprint(-1L, null)
+        val size = file.length()
+        val sha = computeGitBlobSha1(file)
+        return LocalApkFingerprint(sizeBytes = size, gitBlobSha = sha)
     }
 
     private fun downloadApkFile(
@@ -557,5 +668,82 @@ object BridgeAppUpdater {
             .substringBefore('+')
         val nums = Regex("""\d+""").findAll(cleaned).mapNotNull { it.value.toIntOrNull() }.toList()
         return nums.ifEmpty { listOf(0) }
+    }
+
+    internal data class LocalApkFingerprint(
+        val sizeBytes: Long,
+        val gitBlobSha: String?
+    )
+
+    internal data class UpdateEvaluation(
+        val isUpdateAvailable: Boolean,
+        val matchedByArtifactDiff: Boolean
+    )
+
+    internal fun computeGitBlobSha1(file: File): String? {
+        if (!file.exists() || !file.isFile) return null
+        return runCatching {
+            val len = file.length()
+            val md = MessageDigest.getInstance("SHA-1")
+            md.update("blob $len\u0000".toByteArray(Charsets.UTF_8))
+            FileInputStream(file).use { input ->
+                val buf = ByteArray(16 * 1024)
+                while (true) {
+                    val read = input.read(buf)
+                    if (read == -1) break
+                    md.update(buf, 0, read)
+                }
+            }
+            md.digest().joinToString("") { "%02x".format(it) }
+        }.getOrNull()
+    }
+
+    internal fun evaluateMainBranchUpdate(
+        remoteCode: Int?,
+        remoteName: String,
+        remoteSize: Long,
+        remoteSha: String,
+        currentVersionCode: Int,
+        currentVersionName: String,
+        localSize: Long,
+        localGitSha: String?,
+        lastInstalledSha: String?,
+        lastInstalledVersionCode: Int
+    ): UpdateEvaluation {
+        if (remoteCode != null) {
+            if (remoteCode > currentVersionCode) {
+                return UpdateEvaluation(isUpdateAvailable = true, matchedByArtifactDiff = false)
+            }
+            if (remoteCode < currentVersionCode) {
+                return UpdateEvaluation(isUpdateAvailable = false, matchedByArtifactDiff = false)
+            }
+        } else if (remoteName.isNotBlank()) {
+            val cmp = compareSemver(remoteName, currentVersionName)
+            if (cmp > 0) {
+                return UpdateEvaluation(isUpdateAvailable = true, matchedByArtifactDiff = false)
+            }
+            if (cmp < 0) {
+                return UpdateEvaluation(isUpdateAvailable = false, matchedByArtifactDiff = false)
+            }
+        }
+
+        // Same versionCode / versionName -> detect updated APK on main via exact byte size or git blob sha
+        if (remoteSha.isNotBlank() &&
+            remoteSha.equals(lastInstalledSha, ignoreCase = true) &&
+            lastInstalledVersionCode == currentVersionCode
+        ) {
+            return UpdateEvaluation(isUpdateAvailable = false, matchedByArtifactDiff = false)
+        }
+
+        val sizeDiffers = remoteSize > 0L && localSize > 0L && remoteSize != localSize
+        val shaDiffers = remoteSha.isNotBlank() &&
+            !localGitSha.isNullOrBlank() &&
+            !remoteSha.equals(localGitSha, ignoreCase = true)
+
+        return if (sizeDiffers || shaDiffers) {
+            UpdateEvaluation(isUpdateAvailable = true, matchedByArtifactDiff = true)
+        } else {
+            UpdateEvaluation(isUpdateAvailable = false, matchedByArtifactDiff = false)
+        }
     }
 }

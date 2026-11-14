@@ -40,7 +40,7 @@ class InstallStatusReceiver : BroadcastReceiver() {
                 }
             }
             PackageInstaller.STATUS_SUCCESS -> {
-                BridgeAppUpdater.onInstallSucceeded()
+                BridgeAppUpdater.onInstallSucceeded(context)
             }
             PackageInstaller.STATUS_FAILURE_ABORTED -> {
                 BridgeAppUpdater.onInstallFailed("Установка отменена пользователем")

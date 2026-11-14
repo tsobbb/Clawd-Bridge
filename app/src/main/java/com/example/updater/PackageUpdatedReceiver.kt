@@ -16,6 +16,7 @@ class PackageUpdatedReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
         if (intent?.action != Intent.ACTION_MY_PACKAGE_REPLACED) return
         Log.i(TAG, "MY_PACKAGE_REPLACED received — restarting bridge service and rebinding listener")
+        BridgeAppUpdater.onPackageReplaced(context)
         LocalHttpServer.start()
         MediaBridgeForegroundService.start(context)
         NotificationRebindHelper.rebindService(context)

@@ -9,6 +9,7 @@ import android.graphics.RuntimeShader
 import android.graphics.Shader
 import android.os.Build
 import android.provider.Settings
+import android.util.Log
 import androidx.annotation.RequiresApi
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
@@ -415,9 +416,15 @@ private const val APPLE_MUSIC_FLOW_AGSL = """
         return rot * 64.0;
     }
 
-    float3 sampleLayered(shader tex, float2 coordA, float2 coordB, float blendFactor) {
-        float3 colA = tex.eval(coordA).rgb;
-        float3 colB = tex.eval(coordB).rgb;
+    float3 samplePrev(float2 coordA, float2 coordB, float blendFactor) {
+        float3 colA = float3(uTexPrev.eval(coordA).rgb);
+        float3 colB = float3(uTexPrev.eval(coordB).rgb);
+        return mix(colA, colB, blendFactor);
+    }
+
+    float3 sampleCurr(float2 coordA, float2 coordB, float blendFactor) {
+        float3 colA = float3(uTexCurr.eval(coordA).rgb);
+        float3 colB = float3(uTexCurr.eval(coordB).rgb);
         return mix(colA, colB, blendFactor);
     }
 
@@ -433,8 +440,8 @@ private const val APPLE_MUSIC_FLOW_AGSL = """
         float2 coordB = warpCoords(centeredUv, -uTime * 0.10 + 1.05, zoomB, 2.1, float2(0.35, 0.28));
 
         float waveMix = clamp(0.5 + 0.25 * sin(uTime * 0.25 + uv.x * 2.0 + uv.y * 1.4), 0.15, 0.85);
-        float3 colPrev = sampleLayered(uTexPrev, coordA, coordB, waveMix);
-        float3 colCurr = sampleLayered(uTexCurr, coordA, coordB, waveMix);
+        float3 colPrev = samplePrev(coordA, coordB, waveMix);
+        float3 colCurr = sampleCurr(coordA, coordB, waveMix);
         float3 col = mix(colPrev, colCurr, clamp(uMix, 0.0, 1.0));
 
         // Subtle chroma lift ONLY for already colorful pixels; preserve pure gray/B&W (sat == 0.0)
@@ -475,7 +482,19 @@ private fun AppleMusicFlowBackdrop(
     palette: LivingPaletteState,
     modifier: Modifier = Modifier
 ) {
-    val shader = remember { RuntimeShader(APPLE_MUSIC_FLOW_AGSL) }
+    val shader = remember {
+        runCatching { RuntimeShader(APPLE_MUSIC_FLOW_AGSL) }
+            .onFailure { err ->
+                Log.e("LivingThemeEngine", "AGSL shader compile failed, falling back to Canvas", err)
+            }
+            .getOrNull()
+    }
+    var runtimeFailed by remember { mutableStateOf(shader == null) }
+
+    if (runtimeFailed || shader == null) {
+        CanvasFallbackFlowBackdrop(palette = palette, modifier = modifier)
+        return
+    }
 
     // CRITICAL: Read animated state INSIDE drawBehind and create fresh ShaderBrush(shader) per draw
     // so Compose + Skia invalidate & redraw on every frame at 60/120 FPS!
@@ -483,20 +502,28 @@ private fun AppleMusicFlowBackdrop(
         modifier = modifier
             .fillMaxSize()
             .drawBehind {
-                val t = palette.timeSecondsState.value
-                val mixVal = palette.mixState.value
-                val activeMode = palette.activeModeState.value
-                val motionFade = palette.motionFadeState.value
+                val success = runCatching {
+                    val t = palette.timeSecondsState.value
+                    val mixVal = palette.mixState.value
+                    val activeMode = palette.activeModeState.value
+                    val motionFade = palette.motionFadeState.value
 
-                shader.setInputShader("uTexPrev", palette.prevShader)
-                shader.setInputShader("uTexCurr", palette.currShader)
-                shader.setFloatUniform("uResolution", size.width, size.height)
-                shader.setFloatUniform("uTime", t)
-                shader.setFloatUniform("uMix", mixVal)
-                shader.setFloatUniform("uActiveMode", activeMode)
-                shader.setFloatUniform("uMotionFade", motionFade)
+                    shader.setInputShader("uTexPrev", palette.prevShader)
+                    shader.setInputShader("uTexCurr", palette.currShader)
+                    shader.setFloatUniform("uResolution", size.width, size.height)
+                    shader.setFloatUniform("uTime", t)
+                    shader.setFloatUniform("uMix", mixVal)
+                    shader.setFloatUniform("uActiveMode", activeMode)
+                    shader.setFloatUniform("uMotionFade", motionFade)
 
-                drawRect(brush = ShaderBrush(shader))
+                    drawRect(brush = ShaderBrush(shader))
+                }.onFailure { err ->
+                    Log.e("LivingThemeEngine", "AGSL draw failed, falling back to Canvas", err)
+                }.isSuccess
+
+                if (!success) {
+                    runtimeFailed = true
+                }
             }
     )
 }

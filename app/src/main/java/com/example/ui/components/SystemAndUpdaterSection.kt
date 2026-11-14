@@ -494,12 +494,24 @@ private fun BridgeUpdaterBlock(
         AnimatedVisibility(visible = updateState is BridgeUpdateState.UpdateAvailable) {
             val avail = updateState as? BridgeUpdateState.UpdateAvailable
             avail?.release?.let { release ->
-                val sizeLabel = if (release.sizeBytes > 0) {
-                    " • ${String.format(Locale.US, "%.1f МБ", release.sizeBytes / (1024.0 * 1024.0))}"
+                val exactMb = if (release.sizeBytes > 0) {
+                    String.format(Locale.US, "%.2f МБ", release.sizeBytes / (1024.0 * 1024.0))
                 } else ""
+                val statusText = if (release.isRebuildWithSameVersion) {
+                    if (exactMb.isNotEmpty()) "Доступна новая сборка • $exactMb"
+                    else "Доступна обновлённая сборка (${release.sourceLabel})"
+                } else {
+                    val sizeSuffix = if (exactMb.isNotEmpty()) " • $exactMb" else ""
+                    "Найдена сборка ${release.versionName} (${release.sourceLabel}$sizeSuffix)"
+                }
+                val buttonText = if (release.isRebuildWithSameVersion) {
+                    "Обновить"
+                } else {
+                    "Скачать и установить ${release.apkName}"
+                }
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        text = "Найдена сборка ${release.versionName} (${release.sourceLabel}$sizeLabel)",
+                        text = statusText,
                         style = MaterialTheme.typography.labelSmall.withTabularNumbers().copy(
                             color = SemanticEmerald
                         )
@@ -517,7 +529,7 @@ private fun BridgeUpdaterBlock(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "Скачать и установить ${release.apkName}",
+                            text = buttonText,
                             style = MaterialTheme.typography.labelLarge
                         )
                     }
