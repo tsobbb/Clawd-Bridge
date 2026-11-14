@@ -166,6 +166,65 @@ object BridgeHttpClient {
         return Pair(-1, null)
     }
 
+    data class ConditionalHttpResult(
+        val code: Int,
+        val body: String?,
+        val etag: String?,
+        val notModified: Boolean
+    )
+
+    fun getTextWithEtag(
+        url: String,
+        ifNoneMatch: String? = null,
+        headers: Map<String, String> = emptyMap(),
+        maxRetries: Int = 1
+    ): ConditionalHttpResult {
+        val attempts = maxRetries.coerceAtLeast(0) + 1
+        var lastError: Throwable? = null
+        for (attempt in 0 until attempts) {
+            try {
+                val reqBuilder = Request.Builder().url(url).get()
+                headers.forEach { (k, v) -> reqBuilder.header(k, v) }
+                if (!ifNoneMatch.isNullOrBlank()) {
+                    reqBuilder.header("If-None-Match", ifNoneMatch)
+                }
+                githubClient.newCall(reqBuilder.build()).execute().use { response ->
+                    val code = response.code
+                    val respEtag = response.header("ETag") ?: ifNoneMatch
+                    if (code == 304) {
+                        return ConditionalHttpResult(
+                            code = 304,
+                            body = null,
+                            etag = respEtag,
+                            notModified = true
+                        )
+                    }
+                    if (response.isSuccessful) {
+                        return ConditionalHttpResult(
+                            code = code,
+                            body = response.body?.string(),
+                            etag = respEtag,
+                            notModified = false
+                        )
+                    }
+                    if (code in 500..599 && attempt < attempts - 1) {
+                        Thread.sleep(700L)
+                    } else {
+                        return ConditionalHttpResult(code = code, body = null, etag = respEtag, notModified = false)
+                    }
+                }
+            } catch (e: IOException) {
+                lastError = e
+                if (Thread.currentThread().isInterrupted) break
+                if (attempt < attempts - 1) runCatching { Thread.sleep(700L) }
+            } catch (t: Throwable) {
+                throw t
+            }
+        }
+        if (lastError != null) throw lastError
+        return ConditionalHttpResult(code = -1, body = null, etag = ifNoneMatch, notModified = false)
+    }
+
     fun downloadFile(
         url: String,
         partFile: File,

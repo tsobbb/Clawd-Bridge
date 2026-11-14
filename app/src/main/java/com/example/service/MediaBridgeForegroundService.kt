@@ -34,6 +34,7 @@ class MediaBridgeForegroundService : Service() {
 
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private var watchdogJob: Job? = null
+    private var updateCheckJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -62,8 +63,9 @@ class MediaBridgeForegroundService : Service() {
         // 3. Trigger initial rebind check
         NotificationRebindHelper.rebindService(this)
 
-        // 4. Start active watchdog for auto-recovery from zombie states
+        // 4. Start active watchdog for auto-recovery from zombie states + 10-min ETag update loop
         startWatchdog()
+        startAutoUpdateLoop()
 
         return START_STICKY
     }
@@ -78,6 +80,7 @@ class MediaBridgeForegroundService : Service() {
         super.onDestroy()
         Log.i(TAG, "MediaBridgeForegroundService destroyed")
         watchdogJob?.cancel()
+        updateCheckJob?.cancel()
         serviceScope.cancel()
     }
 
@@ -139,6 +142,21 @@ class MediaBridgeForegroundService : Service() {
                     Log.w(TAG, "Watchdog detected disconnected listener with granted permission. Auto-recovering...")
                     NotificationRebindHelper.forceRebindService(this@MediaBridgeForegroundService)
                 }
+            }
+        }
+    }
+
+    private fun startAutoUpdateLoop() {
+        if (updateCheckJob?.isActive == true) return
+
+        updateCheckJob = serviceScope.launch {
+            delay(20_000L)
+            while (isActive) {
+                com.example.updater.BridgeAppUpdater.checkForUpdates(
+                    context = this@MediaBridgeForegroundService,
+                    isBackground = true
+                )
+                delay(com.example.updater.BridgeAppUpdater.AUTO_CHECK_INTERVAL_MS)
             }
         }
     }

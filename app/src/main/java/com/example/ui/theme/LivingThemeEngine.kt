@@ -37,8 +37,12 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.layer.CompositingStrategy as LayerCompositingStrategy
+import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -54,6 +58,7 @@ import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 import kotlin.math.sin
 
 /**
@@ -188,7 +193,8 @@ fun rememberLivingPaletteState(
     liveState: NowPlayingData,
     artworkBitmap: Bitmap? = null,
     dynamicBackgroundEnabled: Boolean = true,
-    backgroundStyle: BackgroundStyle = BackgroundStyle.LIQUID_SILK
+    backgroundStyle: BackgroundStyle = BackgroundStyle.LIQUID_SILK,
+    suppressBackgroundMotion: Boolean = false
 ): LivingPaletteState {
     val lifecycleOwner = LocalLifecycleOwner.current
     val lifecycleState by lifecycleOwner.lifecycle.currentStateFlow.collectAsStateWithLifecycle()
@@ -347,9 +353,12 @@ fun rememberLivingPaletteState(
         }
     }
 
-    // 5. Background orbit/shader clock — frozen ONLY when dynamicBackgroundEnabled is OFF or style == PURE_BLACK
+    // 5. Background orbit/shader clock — frozen ONLY when dynamicBackgroundEnabled is OFF, PURE_BLACK, or suppressed
     val bgTimeSecondsState = remember { mutableFloatStateOf(2.4f) }
-    val shouldAnimateBg = dynamicBackgroundEnabled && isInForeground && backgroundStyle != BackgroundStyle.PURE_BLACK
+    val shouldAnimateBg = dynamicBackgroundEnabled &&
+        isInForeground &&
+        !suppressBackgroundMotion &&
+        backgroundStyle != BackgroundStyle.PURE_BLACK
     LaunchedEffect(shouldAnimateBg) {
         if (!shouldAnimateBg) return@LaunchedEffect
         var lastUptimeMs = SystemClock.uptimeMillis()
@@ -539,6 +548,8 @@ fun LivingAuroraBackdrop(
     }
 }
 
+private const val SHADER_DOWNSAMPLE_WIDTH_PX = 220
+
 @Composable
 private fun LiquidSilkNoiseBackdrop(
     palette: LivingPaletteState,
@@ -549,6 +560,12 @@ private fun LiquidSilkNoiseBackdrop(
             runCatching { RuntimeShader(LIQUID_SILK_AGSL) }.getOrNull()
         } else null
     }
+    val shaderBrush = remember(shaderHolder) {
+        shaderHolder?.let { ShaderBrush(it) }
+    }
+    val lowResLayer = rememberGraphicsLayer().apply {
+        compositingStrategy = LayerCompositingStrategy.Offscreen
+    }
 
     Canvas(modifier = modifier.fillMaxSize()) {
         drawRect(Color(0xFF07080B))
@@ -557,19 +574,35 @@ private fun LiquidSilkNoiseBackdrop(
         if (w <= 0f || h <= 0f) return@Canvas
 
         val t = palette.bgTimeSecondsState.value
-        val colors = palette.extendedColorStates.map { it.value }
+        val colorStates = palette.extendedColorStates
         val intensity = if (palette.isTrackActive) 1.0f else 0.78f
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && shaderHolder != null) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            shaderHolder != null &&
+            shaderBrush != null
+        ) {
             val rendered = runCatching {
-                drawLiquidSilkAgsl(
-                    shader = shaderHolder,
-                    width = w,
-                    height = h,
-                    timeSec = t,
-                    colors = colors,
-                    intensity = intensity
-                )
+                val lowW = SHADER_DOWNSAMPLE_WIDTH_PX.coerceAtMost(w.roundToInt().coerceAtLeast(1))
+                val lowH = ((h / w) * lowW).roundToInt().coerceIn(64, 560)
+                shaderHolder.setFloatUniform("uResolution", lowW.toFloat(), lowH.toFloat())
+                shaderHolder.setFloatUniform("uTime", t)
+                shaderHolder.setFloatUniform("uIntensity", intensity)
+                for (i in 0 until 6) {
+                    val c = colorStates[i].value
+                    shaderHolder.setFloatUniform("uColor$i", c.red, c.green, c.blue)
+                }
+                lowResLayer.record(size = IntSize(lowW, lowH)) {
+                    drawRect(brush = shaderBrush)
+                }
+                withTransform({
+                    scale(
+                        scaleX = w / lowW.toFloat(),
+                        scaleY = h / lowH.toFloat(),
+                        pivot = Offset.Zero
+                    )
+                }) {
+                    drawLayer(lowResLayer)
+                }
             }.isSuccess
             if (rendered) return@Canvas
         }
@@ -577,57 +610,44 @@ private fun LiquidSilkNoiseBackdrop(
         // Smooth Canvas fallback for API < 33 or unsupported shader hardware
         drawSilkCanvasFallback(
             t = t,
-            colors = colors,
+            colorStates = colorStates,
             intensity = intensity
         )
     }
 }
 
-@RequiresApi(Build.VERSION_CODES.TIRAMISU)
-private fun DrawScope.drawLiquidSilkAgsl(
-    shader: RuntimeShader,
-    width: Float,
-    height: Float,
-    timeSec: Float,
-    colors: List<Color>,
-    intensity: Float
-) {
-    shader.setFloatUniform("uResolution", width, height)
-    shader.setFloatUniform("uTime", timeSec)
-    shader.setFloatUniform("uIntensity", intensity)
-    for (i in 0 until 6) {
-        val c = colors[i]
-        shader.setFloatUniform("uColor$i", c.red, c.green, c.blue)
-    }
-    drawRect(brush = ShaderBrush(shader))
-}
-
 private fun DrawScope.drawSilkCanvasFallback(
     t: Float,
-    colors: List<Color>,
+    colorStates: List<State<Color>>,
     intensity: Float
 ) {
     val w = size.width
     val h = size.height
-    val coords = arrayOf(
+    val baseRadius = max(w, h)
+    drawSoftCloud(
         Offset(w * (0.24f + 0.22f * sin(t * 0.42f)), h * (0.20f + 0.18f * cos(t * 0.35f))),
-        Offset(w * (0.76f - 0.24f * cos(t * 0.38f)), h * (0.34f + 0.22f * sin(t * 0.31f))),
-        Offset(w * (0.38f + 0.26f * cos(t * 0.34f + 1.4f)), h * (0.68f - 0.20f * sin(t * 0.40f))),
-        Offset(w * (0.72f - 0.22f * sin(t * 0.46f + 0.8f)), h * (0.78f - 0.18f * cos(t * 0.33f))),
-        Offset(w * (0.50f + 0.18f * sin(t * 0.29f + 2.2f)), h * (0.48f + 0.20f * cos(t * 0.36f))),
-        Offset(w * (0.18f + 0.16f * cos(t * 0.44f + 3.0f)), h * (0.46f - 0.16f * sin(t * 0.37f)))
+        baseRadius * 0.52f, colorStates[0].value, 0.42f * intensity, 1.15f, 0.88f
     )
-    val alphas = floatArrayOf(0.42f, 0.38f, 0.34f, 0.28f, 0.26f, 0.24f)
-    for (i in 0 until 6) {
-        drawSoftCloud(
-            center = coords[i],
-            radius = max(w, h) * (0.52f + (i % 3) * 0.08f),
-            color = colors[i],
-            alpha = alphas[i] * intensity,
-            scaleX = 1.15f,
-            scaleY = 0.88f
-        )
-    }
+    drawSoftCloud(
+        Offset(w * (0.76f - 0.24f * cos(t * 0.38f)), h * (0.34f + 0.22f * sin(t * 0.31f))),
+        baseRadius * 0.60f, colorStates[1].value, 0.38f * intensity, 1.15f, 0.88f
+    )
+    drawSoftCloud(
+        Offset(w * (0.38f + 0.26f * cos(t * 0.34f + 1.4f)), h * (0.68f - 0.20f * sin(t * 0.40f))),
+        baseRadius * 0.68f, colorStates[2].value, 0.34f * intensity, 1.15f, 0.88f
+    )
+    drawSoftCloud(
+        Offset(w * (0.72f - 0.22f * sin(t * 0.46f + 0.8f)), h * (0.78f - 0.18f * cos(t * 0.33f))),
+        baseRadius * 0.52f, colorStates[3].value, 0.28f * intensity, 1.15f, 0.88f
+    )
+    drawSoftCloud(
+        Offset(w * (0.50f + 0.18f * sin(t * 0.29f + 2.2f)), h * (0.48f + 0.20f * cos(t * 0.36f))),
+        baseRadius * 0.60f, colorStates[4].value, 0.26f * intensity, 1.15f, 0.88f
+    )
+    drawSoftCloud(
+        Offset(w * (0.18f + 0.16f * cos(t * 0.44f + 3.0f)), h * (0.46f - 0.16f * sin(t * 0.37f))),
+        baseRadius * 0.68f, colorStates[5].value, 0.24f * intensity, 1.15f, 0.88f
+    )
 }
 
 @Composable
@@ -649,7 +669,7 @@ private fun AppleMusicCoverBackdrop(
             } else {
                 Modifier
             }
-            val t = palette.bgTimeSecondsState.value
+            val tState = palette.bgTimeSecondsState
 
             Image(
                 bitmap = cover,
@@ -658,6 +678,7 @@ private fun AppleMusicCoverBackdrop(
                 modifier = Modifier
                     .fillMaxSize()
                     .graphicsLayer {
+                        val t = tState.value
                         val driftX = size.width * 0.08f * sin(t * 0.28f)
                         val driftY = size.height * 0.08f * cos(t * 0.23f)
                         scaleX = 2.45f
@@ -677,6 +698,7 @@ private fun AppleMusicCoverBackdrop(
                     .fillMaxSize()
                     .alpha(0.55f)
                     .graphicsLayer {
+                        val t = tState.value
                         val driftX = -size.width * 0.10f * cos(t * 0.24f + 1.2f)
                         val driftY = size.height * 0.09f * sin(t * 0.26f + 0.7f)
                         scaleX = 2.25f
@@ -697,12 +719,12 @@ private fun AppleMusicCoverBackdrop(
             // Seamless ambient cloud fallback when idle/without decoded cover
             Canvas(modifier = Modifier.fillMaxSize()) {
                 val t = palette.bgTimeSecondsState.value
-                val clouds = palette.cloudColorStates.map { it.value }
+                val clouds = palette.cloudColorStates
                 val intensity = if (palette.isTrackActive) 0.90f else 0.72f
                 drawSoftCloud(
                     Offset(size.width * (0.3f + 0.2f * sin(t * 0.4f)), size.height * 0.3f),
                     size.width * 0.9f,
-                    clouds[0],
+                    clouds[0].value,
                     0.42f * intensity,
                     1.1f,
                     0.95f
@@ -710,7 +732,7 @@ private fun AppleMusicCoverBackdrop(
                 drawSoftCloud(
                     Offset(size.width * (0.7f - 0.2f * cos(t * 0.35f)), size.height * 0.65f),
                     size.width * 0.85f,
-                    clouds[1],
+                    clouds[1].value,
                     0.36f * intensity,
                     0.95f,
                     1.1f
@@ -730,6 +752,21 @@ private fun Grid3x3MeshBackdrop(
             runCatching { RuntimeShader(GRID_3X3_AGSL) }.getOrNull()
         } else null
     }
+    val shaderBrush = remember(shaderHolder) {
+        shaderHolder?.let { ShaderBrush(it) }
+    }
+    val lowResLayer = rememberGraphicsLayer().apply {
+        compositingStrategy = LayerCompositingStrategy.Offscreen
+    }
+    val overlayBrush = remember {
+        Brush.verticalGradient(
+            colors = listOf(
+                Color(0x5507080B),
+                Color(0x2207080B),
+                Color(0x6607080B)
+            )
+        )
+    }
 
     Canvas(modifier = modifier.fillMaxSize()) {
         drawRect(Color(0xFF07080B))
@@ -738,63 +775,84 @@ private fun Grid3x3MeshBackdrop(
         if (w <= 0f || h <= 0f) return@Canvas
 
         val t = palette.bgTimeSecondsState.value
-        val grid = palette.gridColorStates.map { it.value }
+        val gridStates = palette.gridColorStates
         val intensity = if (palette.isTrackActive) 1.0f else 0.80f
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && shaderHolder != null) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            shaderHolder != null &&
+            shaderBrush != null
+        ) {
             val rendered = runCatching {
-                shaderHolder.setFloatUniform("uResolution", w, h)
+                val lowW = SHADER_DOWNSAMPLE_WIDTH_PX.coerceAtMost(w.roundToInt().coerceAtLeast(1))
+                val lowH = ((h / w) * lowW).roundToInt().coerceIn(64, 560)
+                shaderHolder.setFloatUniform("uResolution", lowW.toFloat(), lowH.toFloat())
                 shaderHolder.setFloatUniform("uTime", t)
                 shaderHolder.setFloatUniform("uIntensity", intensity)
                 for (i in 0 until 9) {
-                    val c = grid[i]
+                    val c = gridStates[i].value
                     shaderHolder.setFloatUniform("uG$i", c.red, c.green, c.blue)
                 }
-                drawRect(brush = ShaderBrush(shaderHolder))
+                lowResLayer.record(size = IntSize(lowW, lowH)) {
+                    drawRect(brush = shaderBrush)
+                }
+                withTransform({
+                    scale(
+                        scaleX = w / lowW.toFloat(),
+                        scaleY = h / lowH.toFloat(),
+                        pivot = Offset.Zero
+                    )
+                }) {
+                    drawLayer(lowResLayer)
+                }
             }.isSuccess
             if (rendered) return@Canvas
         }
 
-        // Smooth 9-node radial mesh fallback
-        val anchorsX = floatArrayOf(0.16f, 0.50f, 0.84f)
-        val anchorsY = floatArrayOf(0.16f, 0.50f, 0.84f)
+        // Smooth 9-node radial mesh fallback (zero array allocations per frame)
         for (gy in 0 until 3) {
+            val anchorY = when (gy) { 0 -> 0.16f; 1 -> 0.50f; else -> 0.84f }
             for (gx in 0 until 3) {
+                val anchorX = when (gx) { 0 -> 0.16f; 1 -> 0.50f; else -> 0.84f }
                 val idx = gy * 3 + gx
                 val isCenter = gx == 1 && gy == 1
                 val swayX = if (isCenter) 0.14f * sin(t * 0.55f) else 0.08f * sin(t * 0.42f + idx * 0.9f)
                 val swayY = if (isCenter) 0.12f * cos(t * 0.48f) else 0.08f * cos(t * 0.39f + idx * 1.1f)
                 val center = Offset(
-                    x = w * (anchorsX[gx] + swayX),
-                    y = h * (anchorsY[gy] + swayY)
+                    x = w * (anchorX + swayX),
+                    y = h * (anchorY + swayY)
                 )
                 drawSoftCloud(
                     center = center,
                     radius = max(w, h) * 0.46f,
-                    color = grid[idx],
+                    color = gridStates[idx].value,
                     alpha = (if (isCenter) 0.52f else 0.40f) * intensity,
                     scaleX = 1.08f,
                     scaleY = 1.08f
                 )
             }
         }
-        drawRect(
-            brush = Brush.verticalGradient(
-                colors = listOf(
-                    Color(0x5507080B),
-                    Color(0x2207080B),
-                    Color(0x6607080B)
-                )
-            )
-        )
+        drawRect(brush = overlayBrush)
     }
 }
+
+private val AURORA_ORB_INDICES = intArrayOf(0, 1, 2, 4, 5, 0, 2)
+private val AURORA_ORB_SCALES = floatArrayOf(0.72f, 0.64f, 0.68f, 0.52f, 0.56f, 0.44f, 0.48f)
+private val AURORA_ORB_ALPHAS = floatArrayOf(0.46f, 0.42f, 0.38f, 0.32f, 0.34f, 0.28f, 0.26f)
 
 @Composable
 private fun AuroraScreenOrbsBackdrop(
     palette: LivingPaletteState,
     modifier: Modifier = Modifier
 ) {
+    val veilBrush = remember {
+        Brush.verticalGradient(
+            listOf(
+                Color(0x5206070B),
+                Color(0x2806070B),
+                Color(0x6606070B)
+            )
+        )
+    }
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -810,14 +868,9 @@ private fun AuroraScreenOrbsBackdrop(
             if (w <= 0f || h <= 0f) return@Canvas
 
             val t = palette.bgTimeSecondsState.value
-            val ext = palette.extendedColorStates.map { it.value }
+            val ext = palette.extendedColorStates
             val intensity = if (palette.isTrackActive) 1.0f else 0.78f
-
-            val orbColors = listOf(
-                ext[0], ext[1], ext[2], ext[4], ext[5], ext[0], ext[2]
-            )
-            val orbScales = floatArrayOf(0.72f, 0.64f, 0.68f, 0.52f, 0.56f, 0.44f, 0.48f)
-            val orbAlphas = floatArrayOf(0.46f, 0.42f, 0.38f, 0.32f, 0.34f, 0.28f, 0.26f)
+            val baseSpan = max(w, h)
 
             for (i in 0 until 7) {
                 val speedA = 0.34f + i * 0.055f
@@ -825,19 +878,20 @@ private fun AuroraScreenOrbsBackdrop(
                 val phase = i * 1.15f
                 val cx = w * (0.5f + 0.36f * sin(t * speedA + phase))
                 val cy = h * (0.5f + 0.34f * cos(t * speedB + phase * 1.3f))
-                val radius = max(w, h) * orbScales[i]
+                val radius = baseSpan * AURORA_ORB_SCALES[i]
+                val orbColor = ext[AURORA_ORB_INDICES[i]].value
+                val orbAlpha = AURORA_ORB_ALPHAS[i] * intensity
+                val center = Offset(cx, cy)
                 drawCircle(
                     brush = Brush.radialGradient(
-                        colorStops = arrayOf(
-                            0.0f to orbColors[i].copy(alpha = orbAlphas[i] * intensity),
-                            0.48f to orbColors[i].copy(alpha = orbAlphas[i] * 0.38f * intensity),
-                            1.0f to Color.Transparent
-                        ),
-                        center = Offset(cx, cy),
+                        0.0f to orbColor.copy(alpha = orbAlpha),
+                        0.48f to orbColor.copy(alpha = orbAlpha * 0.38f),
+                        1.0f to Color.Transparent,
+                        center = center,
                         radius = radius
                     ),
                     radius = radius,
-                    center = Offset(cx, cy),
+                    center = center,
                     blendMode = BlendMode.Screen
                 )
             }
@@ -847,15 +901,7 @@ private fun AuroraScreenOrbsBackdrop(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        listOf(
-                            Color(0x5206070B),
-                            Color(0x2806070B),
-                            Color(0x6606070B)
-                        )
-                    )
-                )
+                .background(veilBrush)
         )
     }
 }
@@ -888,7 +934,7 @@ private fun DrawScope.drawSoftCloud(
     }
 }
 
-// Pure procedural AGSL without ANY `shader` function arguments (safe on Android 13 / MIUI)
+// Fast trig Domain Warping AGSL without heavy fbm/hash loops & ZERO shader arguments
 private const val LIQUID_SILK_AGSL = """
 uniform float2 uResolution;
 uniform float uTime;
@@ -900,71 +946,43 @@ uniform float3 uColor3;
 uniform float3 uColor4;
 uniform float3 uColor5;
 
-float hash21(float2 p) {
-    p = fract(p * float2(123.34, 456.21));
-    p += dot(p, p + 45.32);
-    return fract(p.x * p.y);
-}
-
-float vnoise(float2 p) {
-    float2 i = floor(p);
-    float2 f = fract(p);
-    float2 u = f * f * (3.0 - 2.0 * f);
-    float a = hash21(i);
-    float b = hash21(i + float2(1.0, 0.0));
-    float c = hash21(i + float2(0.0, 1.0));
-    float d = hash21(i + float2(1.0, 1.0));
-    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
-}
-
-float fbm(float2 p) {
-    float v = 0.0;
-    float a = 0.5;
-    float2 shift = float2(17.3, 9.2);
-    for (int i = 0; i < 3; i++) {
-        v += a * vnoise(p);
-        p = p * 1.92 + shift;
-        a *= 0.5;
-    }
-    return v;
-}
-
 half4 main(float2 fragCoord) {
     float2 res = max(uResolution, float2(1.0, 1.0));
     float2 uv = (fragCoord - 0.5 * res) / min(res.x, res.y);
-    float t = uTime * 0.16;
+    float t = uTime * 0.24;
 
-    // 2-stage Domain Warping for silky organic flow
+    // 3-stage nested trigonometric domain warping (~10x faster than multi-octave vnoise/fbm)
+    float2 p = uv * 1.85;
     float2 q = float2(
-        fbm(uv * 1.35 + float2(t * 0.85, -t * 0.55)),
-        fbm(uv * 1.35 + float2(-t * 0.60, t * 0.75) + float2(5.2, 1.3))
+        sin(p.x * 1.15 + p.y * 0.72 + t * 0.85) + 0.55 * cos(p.y * 1.45 - t * 0.55),
+        cos(p.y * 1.20 - p.x * 0.68 + t * 0.68) + 0.55 * sin(p.x * 1.38 + t * 0.48)
     );
     float2 r = float2(
-        fbm(uv * 1.65 + 1.4 * q + float2(1.7, 9.2) + t * 0.35),
-        fbm(uv * 1.65 + 1.4 * q + float2(8.3, 2.8) - t * 0.28)
+        sin((p.x + q.x * 0.85) * 1.42 - t * 0.42 + 1.3),
+        cos((p.y + q.y * 0.85) * 1.36 + t * 0.36 + 2.1)
     );
 
-    float flow = fbm(uv * 1.15 + 1.6 * r);
-    float w0 = smoothstep(0.18, 0.72, sin(flow * 4.2 + r.x * 2.1) * 0.5 + 0.5);
-    float w1 = smoothstep(0.22, 0.78, cos(r.y * 3.8 - t * 1.4) * 0.5 + 0.5);
-    float w2 = smoothstep(0.28, 0.82, fbm(uv * 2.1 - r * 1.3 + t * 0.4));
-    float w3 = smoothstep(0.35, 0.88, q.x);
+    float flow = sin((p.x + r.x) * 1.18 + (p.y - r.y) * 0.94 + t * 0.28) * 0.5 + 0.5;
+    float w0 = smoothstep(0.14, 0.84, sin(flow * 3.2 + r.x * 1.7 + q.y * 0.6) * 0.5 + 0.5);
+    float w1 = smoothstep(0.18, 0.82, cos(r.y * 2.4 - q.x * 1.1 - t * 0.65) * 0.5 + 0.5);
+    float w2 = smoothstep(0.24, 0.88, sin((uv.x - uv.y) * 2.3 + r.x * 1.3 + t * 0.38) * 0.5 + 0.5);
+    float w3 = smoothstep(0.28, 0.90, cos((uv.x + uv.y) * 2.1 - q.y * 1.2 + t * 0.30) * 0.5 + 0.5);
 
     float3 col = mix(uColor0, uColor1, w0);
-    col = mix(col, uColor2, w1 * 0.78);
+    col = mix(col, uColor2, w1 * 0.76);
     col = mix(col, uColor4, w2 * 0.62);
-    col = mix(col, uColor5, pow(w3, 1.5) * 0.55);
-    col = mix(uColor3, col, smoothstep(0.08, 0.68, flow));
+    col = mix(col, uColor5, (w3 * w3) * 0.52);
+    col = mix(uColor3, col, smoothstep(0.10, 0.68, flow));
 
     // ~35% deep obsidian shadow valleys (#07080B) so contrast & depth stay dramatic
     float3 shadowBase = float3(0.027, 0.031, 0.043);
-    float valley = smoothstep(0.24, 0.68, flow * 0.72 + q.y * 0.28);
-    float vignette = smoothstep(1.35, 0.15, length(uv));
+    float valley = smoothstep(0.18, 0.72, flow * 0.68 + (q.y * 0.25 + 0.25) * 0.32);
+    float vignette = smoothstep(1.40, 0.12, length(uv));
     float glowMask = clamp(valley * (0.58 + 0.42 * vignette) * uIntensity, 0.0, 0.76);
     float3 finalRgb = mix(shadowBase, col, glowMask);
 
-    // 1.2% dithering to remove 8-bit gradient banding
-    float dither = (hash21(fragCoord + fract(uTime) * 60.0) - 0.5) * 0.012;
+    // Subtle procedural screen-space dither to eliminate 8-bit banding
+    float dither = (fract(sin(dot(fragCoord, float2(12.9898, 78.233))) * 43758.5453) - 0.5) * 0.010;
     finalRgb = clamp(finalRgb + dither, 0.0, 1.0);
     return half4(finalRgb, 1.0);
 }

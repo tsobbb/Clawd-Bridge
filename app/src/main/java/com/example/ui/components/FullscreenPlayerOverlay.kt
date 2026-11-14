@@ -1,9 +1,14 @@
 package com.example.ui.components
 
+import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Bitmap
 import android.os.Build
 import android.os.SystemClock
+import android.view.WindowManager
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
@@ -19,10 +24,12 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -38,6 +45,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -53,8 +61,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Album
+import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.CloseFullscreen
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -70,8 +80,6 @@ import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material3.BottomSheetDefaults
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
@@ -85,7 +93,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -101,10 +112,13 @@ import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
@@ -115,11 +129,16 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.lyrics.LyricsCatalogResolver
+import com.example.lyrics.LyricsInterlude
 import com.example.lyrics.LyricsLine
 import com.example.model.NowPlayingData
 import com.example.state.PlayerAccentSource
@@ -130,11 +149,11 @@ import com.example.state.PlayerStyleConfig
 import com.example.state.PlayerTitleAlignment
 import com.example.ui.theme.HairlineDivider
 import com.example.ui.theme.JetBrainsMonoFontFamily
-import com.example.ui.theme.LivingAuroraBackdrop
 import com.example.ui.theme.LivingPaletteState
 import com.example.ui.theme.MintCta
 import com.example.ui.theme.NestedSurface
 import com.example.ui.theme.SecondaryGlass
+import com.example.ui.theme.SemanticAmber
 import com.example.ui.theme.SemanticCoral
 import com.example.ui.theme.SheetScrim
 import com.example.ui.theme.SheetSurface
@@ -147,7 +166,7 @@ import com.example.util.AppMetadataResolver
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.Locale
-import kotlin.math.abs
+import kotlin.math.sin
 
 private val LYRICS_PROVIDERS = listOf(
     "auto" to "Авто (LRCLIB → NetEase → Genius)",
@@ -290,11 +309,25 @@ private fun FullscreenPlayerContent(
     val density = LocalDensity.current
 
     var isLyricsMode by remember { mutableStateOf(false) }
-    var showOverflowMenu by remember { mutableStateOf(false) }
+    var isFocusMode by remember { mutableStateOf(false) }
+    var showOverflowSheet by remember { mutableStateOf(false) }
     var showStyleSheet by remember { mutableStateOf(false) }
     var showInfoSheet by remember { mutableStateOf(false) }
     var showOffsetPopover by remember { mutableStateOf(false) }
     var showRemainingTime by remember { mutableStateOf(false) }
+
+    // Keep screen awake during Focus / Desk display mode
+    DisposableEffect(isFocusMode, context) {
+        val window = (context as? Activity)?.window
+        if (isFocusMode) {
+            window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+        onDispose {
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
 
     // Dismiss drag translation (attached ONLY to header & Mode A cover so lyrics scroll never collides)
     var dismissDragPx by remember { mutableFloatStateOf(0f) }
@@ -307,19 +340,25 @@ private fun FullscreenPlayerContent(
 
     BackHandler {
         when {
-            showOverflowMenu -> showOverflowMenu = false
+            showOverflowSheet -> showOverflowSheet = false
             showStyleSheet -> showStyleSheet = false
             showInfoSheet -> showInfoSheet = false
             showOffsetPopover -> showOffsetPopover = false
+            isFocusMode -> isFocusMode = false
             isLyricsMode -> isLyricsMode = false
             else -> onDismiss()
         }
     }
 
-    // 60/120 FPS client-side display position interpolation
-    var displayPositionMs by remember { mutableLongStateOf(track.positionMs) }
-    var isScrubbing by remember { mutableStateOf(false) }
-    var scrubPositionMs by remember { mutableLongStateOf(track.positionMs) }
+    // 60/120 FPS client-side display position state — NEVER read at this parent scope!
+    val displayPositionMsState = remember { mutableLongStateOf(track.positionMs) }
+    val isScrubbingState = remember { mutableStateOf(false) }
+    val scrubPositionMsState = remember { mutableLongStateOf(track.positionMs) }
+    val shownPositionMsState = remember {
+        derivedStateOf {
+            if (isScrubbingState.value) scrubPositionMsState.longValue else displayPositionMsState.longValue
+        }
+    }
 
     LaunchedEffect(
         track.positionMs,
@@ -330,7 +369,7 @@ private fun FullscreenPlayerContent(
         track.artist,
         track.hasMedia
     ) {
-        displayPositionMs = track.positionMs
+        displayPositionMsState.longValue = track.positionMs
         if (track.hasMedia && track.isPlaying) {
             var lastNanos = 0L
             while (isActive) {
@@ -338,8 +377,8 @@ private fun FullscreenPlayerContent(
                     if (lastNanos != 0L) {
                         val dtMs = ((nanos - lastNanos).coerceIn(0L, 100_000_000L) / 1_000_000.0)
                         val speed = if (track.playbackSpeed > 0f) track.playbackSpeed else 1f
-                        val next = displayPositionMs + (dtMs * speed).toLong()
-                        displayPositionMs = if (track.durationMs > 0L) {
+                        val next = displayPositionMsState.longValue + (dtMs * speed).toLong()
+                        displayPositionMsState.longValue = if (track.durationMs > 0L) {
                             next.coerceIn(0L, track.durationMs)
                         } else {
                             next.coerceAtLeast(0L)
@@ -351,7 +390,6 @@ private fun FullscreenPlayerContent(
         }
     }
 
-    val shownPositionMs = if (isScrubbing) scrubPositionMs else displayPositionMs
     val effectiveAccent = if (styleConfig.accentSource == PlayerAccentSource.COVER) {
         livingPalette.playerAccent
     } else {
@@ -379,14 +417,27 @@ private fun FullscreenPlayerContent(
         }
     )
 
+    val containerBgColor = if (styleConfig.backgroundMode == PlayerBackgroundMode.GRADIENT) {
+        Color.Transparent
+    } else {
+        Color(0xFF06080C)
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .graphicsLayer { translationY = animatedDragOffset }
-            .background(Color(0xFF06080C))
+            .background(containerBgColor)
+            .let { mod ->
+                if (isFocusMode && !isLyricsMode) {
+                    mod.clickable { isFocusMode = false }
+                } else {
+                    mod
+                }
+            }
             .testTag("fullscreen_player_overlay")
     ) {
-        // 1. Background layer driven by PlayerBackgroundMode
+        // 1. Background layer driven by PlayerBackgroundMode (zero double-render in GRADIENT mode)
         PlayerDynamicBackdrop(
             backgroundMode = styleConfig.backgroundMode,
             livingPalette = livingPalette,
@@ -403,35 +454,24 @@ private fun FullscreenPlayerContent(
                 .widthIn(max = 560.dp)
                 .align(Alignment.Center)
         ) {
-            // Top Header Bar (swipe-down safe handle + overflow menu)
+            // Top Header Bar (swipe-down safe handle + Focus mode toggle + opaque sheet menu)
             PlayerHeaderBar(
                 isLyricsMode = isLyricsMode,
+                isFocusMode = isFocusMode,
                 track = track,
                 artworkImage = validBitmap,
                 resolvedAppName = resolvedApp?.displayName ?: "Clawd Bridge",
                 resolvedAppIcon = resolvedApp?.icon,
                 accentColor = effectiveAccent,
-                showOverflowMenu = showOverflowMenu,
-                preferredProvider = preferredLyricsProvider,
                 onDismiss = onDismiss,
                 onHeaderTap = {
                     if (isLyricsMode) isLyricsMode = false
                 },
-                onOpenMenu = { showOverflowMenu = true },
-                onCloseMenu = { showOverflowMenu = false },
-                onOpenStyleSheet = {
-                    showOverflowMenu = false
-                    showStyleSheet = true
+                onToggleFocusMode = {
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    isFocusMode = !isFocusMode
                 },
-                onRefreshLyrics = {
-                    showOverflowMenu = false
-                    onRefreshLyrics(null)
-                },
-                onSelectProvider = { providerId ->
-                    showOverflowMenu = false
-                    isLyricsMode = true
-                    onRefreshLyrics(providerId)
-                },
+                onOpenMenu = { showOverflowSheet = true },
                 modifier = verticalDismissModifier
             )
 
@@ -461,95 +501,129 @@ private fun FullscreenPlayerContent(
                         )
                     } else {
                         PlayerLyricsStage(
+                            context = context,
                             track = track,
-                            displayPositionMs = shownPositionMs,
+                            shownPositionMsState = shownPositionMsState,
                             syncOffsetMs = syncOffsetMs,
                             effectiveAccent = effectiveAccent,
                             livingPalette = livingPalette,
                             lyricsState = lyricsState,
                             onSeekToRawMs = onSeekToRawMs,
-                            onRefreshLyrics = { onRefreshLyrics(null) }
+                            onRefreshLyrics = { onRefreshLyrics(null) },
+                            onOpenProviderMenu = { showOverflowSheet = true }
                         )
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            AnimatedVisibility(visible = !isFocusMode) {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Spacer(modifier = Modifier.height(8.dp))
 
-            // Optional inline Bluetooth Sync Offset quick-adjust popover right above bottom pills
-            AnimatedVisibility(visible = showOffsetPopover) {
-                PlayerQuickOffsetBar(
-                    syncOffsetMs = syncOffsetMs,
-                    accentColor = effectiveAccent,
-                    onSyncOffsetChange = onSyncOffsetChange,
-                    onClose = { showOffsetPopover = false }
-                )
-            }
+                    // Optional inline Bluetooth Sync Offset quick-adjust popover right above bottom pills
+                    AnimatedVisibility(visible = showOffsetPopover) {
+                        PlayerQuickOffsetBar(
+                            syncOffsetMs = syncOffsetMs,
+                            accentColor = effectiveAccent,
+                            onSyncOffsetChange = onSyncOffsetChange,
+                            onClose = { showOffsetPopover = false }
+                        )
+                    }
 
-            // Interactive Seekbar + Timecodes
-            PlayerSeekSection(
-                track = track,
-                shownPositionMs = shownPositionMs,
-                accentColor = effectiveAccent,
-                wavyEnabled = styleConfig.wavySeekbarEnabled,
-                showRemainingTime = showRemainingTime,
-                onToggleRemainingTime = { showRemainingTime = !showRemainingTime },
-                onScrubStart = { targetMs ->
-                    isScrubbing = true
-                    scrubPositionMs = targetMs
-                },
-                onScrubMove = { targetMs ->
-                    scrubPositionMs = targetMs
-                },
-                onScrubEnd = { targetMs ->
-                    isScrubbing = false
-                    displayPositionMs = targetMs
-                    val rawSeek = computeCompensatedSeekTargetMs(targetMs, track.durationMs, syncOffsetMs)
-                    onSeekToRawMs(rawSeek)
+                    // Interactive Seekbar + Timecodes (isolated from parent recomposition)
+                    PlayerSeekSection(
+                        track = track,
+                        shownPositionMsState = shownPositionMsState,
+                        accentColor = effectiveAccent,
+                        wavyEnabled = styleConfig.wavySeekbarEnabled,
+                        showRemainingTime = showRemainingTime,
+                        onToggleRemainingTime = { showRemainingTime = !showRemainingTime },
+                        onScrubStart = { targetMs ->
+                            isScrubbingState.value = true
+                            scrubPositionMsState.longValue = targetMs
+                        },
+                        onScrubMove = { targetMs ->
+                            scrubPositionMsState.longValue = targetMs
+                        },
+                        onScrubEnd = { targetMs ->
+                            isScrubbingState.value = false
+                            displayPositionMsState.longValue = targetMs
+                            val rawSeek = computeCompensatedSeekTargetMs(targetMs, track.durationMs, syncOffsetMs)
+                            onSeekToRawMs(rawSeek)
+                        }
+                    )
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // Transport Bar: -10s | Prev | Play/Pause | Next | +10s
+                    PlayerTransportControls(
+                        isPlaying = track.isPlaying,
+                        accentColor = effectiveAccent,
+                        onSeekMinus10 = { onSeekByDelta(-10_000L) },
+                        onPrevious = {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            onSkipPrevious()
+                        },
+                        onTogglePlayPause = {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            onTogglePlayPause()
+                        },
+                        onNext = {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            onSkipNext()
+                        },
+                        onSeekPlus10 = { onSeekByDelta(10_000L) }
+                    )
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // Bottom 3 Action Pills: [ ⏱ X мс ] | [ ≡ Lyrics ] | [ ☰ Инфо ]
+                    PlayerBottomActionPills(
+                        syncOffsetMs = syncOffsetMs,
+                        isOffsetPopoverOpen = showOffsetPopover,
+                        isLyricsMode = isLyricsMode,
+                        hasSyncedLyrics = (lyricsState as? PlayerLyricsUiState.Loaded)?.result?.synced == true,
+                        accentColor = effectiveAccent,
+                        onToggleOffsetPopover = { showOffsetPopover = !showOffsetPopover },
+                        onToggleLyrics = {
+                            isLyricsMode = !isLyricsMode
+                        },
+                        onOpenInfo = { showInfoSheet = true }
+                    )
                 }
-            )
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // Transport Bar: -10s | Prev | Play/Pause | Next | +10s
-            PlayerTransportControls(
-                isPlaying = track.isPlaying,
-                accentColor = effectiveAccent,
-                onSeekMinus10 = { onSeekByDelta(-10_000L) },
-                onPrevious = {
-                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                    onSkipPrevious()
-                },
-                onTogglePlayPause = {
-                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                    onTogglePlayPause()
-                },
-                onNext = {
-                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                    onSkipNext()
-                },
-                onSeekPlus10 = { onSeekByDelta(10_000L) }
-            )
-
-            Spacer(modifier = Modifier.height(14.dp))
-
-            // Bottom 3 Action Pills: [ ⏱ X мс ] | [ ≡ Lyrics ] | [ ☰ Инфо ]
-            PlayerBottomActionPills(
-                syncOffsetMs = syncOffsetMs,
-                isOffsetPopoverOpen = showOffsetPopover,
-                isLyricsMode = isLyricsMode,
-                hasSyncedLyrics = (lyricsState as? PlayerLyricsUiState.Loaded)?.result?.synced == true,
-                accentColor = effectiveAccent,
-                onToggleOffsetPopover = { showOffsetPopover = !showOffsetPopover },
-                onToggleLyrics = {
-                    isLyricsMode = !isLyricsMode
-                },
-                onOpenInfo = { showInfoSheet = true }
-            )
+            }
         }
     }
 
-    // Live Style Customization Sheet
+    // Opaque Player Options & Lyrics Provider Sheet (eliminates transparent DropdownMenu text bleed-through)
+    if (showOverflowSheet) {
+        PlayerOverflowOptionsSheet(
+            accentColor = effectiveAccent,
+            preferredProvider = preferredLyricsProvider,
+            isFocusMode = isFocusMode,
+            onDismiss = { showOverflowSheet = false },
+            onOpenStyleSheet = {
+                showOverflowSheet = false
+                showStyleSheet = true
+            },
+            onRefreshLyrics = {
+                showOverflowSheet = false
+                isLyricsMode = true
+                onRefreshLyrics(null)
+            },
+            onToggleFocusMode = {
+                showOverflowSheet = false
+                isFocusMode = !isFocusMode
+            },
+            onSelectProvider = { providerId ->
+                showOverflowSheet = false
+                isLyricsMode = true
+                onRefreshLyrics(providerId)
+            }
+        )
+    }
+
+    // Compact Live-Preview Style Customization Sheet (~50% height, low dim)
     if (showStyleSheet) {
         PlayerStyleSettingsSheet(
             styleConfig = styleConfig,
@@ -580,7 +654,7 @@ private fun PlayerDynamicBackdrop(
 ) {
     when (backgroundMode) {
         PlayerBackgroundMode.GRADIENT -> {
-            LivingAuroraBackdrop(palette = livingPalette)
+            // Subtle darkening veil over the single root LivingAuroraBackdrop (zero duplicate shader render!)
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -592,7 +666,7 @@ private fun PlayerDynamicBackdrop(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color(0xFF07080B))
+                    .background(if (blurSource != null) Color(0xFF07080B) else Color(0x3806080C))
             ) {
                 if (blurSource != null) {
                     val blurMod = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -617,8 +691,6 @@ private fun PlayerDynamicBackdrop(
                             .fillMaxSize()
                             .background(Color(0x8A06080C))
                     )
-                } else {
-                    LivingAuroraBackdrop(palette = livingPalette)
                 }
             }
         }
@@ -638,20 +710,16 @@ private fun PlayerDynamicBackdrop(
 @Composable
 private fun PlayerHeaderBar(
     isLyricsMode: Boolean,
+    isFocusMode: Boolean,
     track: NowPlayingData,
     artworkImage: androidx.compose.ui.graphics.ImageBitmap?,
     resolvedAppName: String,
     resolvedAppIcon: androidx.compose.ui.graphics.ImageBitmap?,
     accentColor: Color,
-    showOverflowMenu: Boolean,
-    preferredProvider: String,
     onDismiss: () -> Unit,
     onHeaderTap: () -> Unit,
+    onToggleFocusMode: () -> Unit,
     onOpenMenu: () -> Unit,
-    onCloseMenu: () -> Unit,
-    onOpenStyleSheet: () -> Unit,
-    onRefreshLyrics: () -> Unit,
-    onSelectProvider: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     Row(
@@ -766,7 +834,21 @@ private fun PlayerHeaderBar(
             }
         }
 
-        Box {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(
+                onClick = onToggleFocusMode,
+                modifier = Modifier
+                    .minimumInteractiveComponentSize()
+                    .testTag("player_focus_mode_button")
+            ) {
+                Icon(
+                    imageVector = if (isFocusMode) Icons.Default.CloseFullscreen else Icons.Default.CenterFocusStrong,
+                    contentDescription = if (isFocusMode) "Выйти из режима экрана" else "Настольный режим (экран не гаснет)",
+                    tint = if (isFocusMode) accentColor else TextSecondary,
+                    modifier = Modifier.size(21.dp)
+                )
+            }
+
             IconButton(
                 onClick = onOpenMenu,
                 modifier = Modifier
@@ -779,51 +861,152 @@ private fun PlayerHeaderBar(
                     tint = TextPrimary
                 )
             }
+        }
+    }
+}
 
-            DropdownMenu(
-                expanded = showOverflowMenu,
-                onDismissRequest = onCloseMenu,
-                containerColor = SheetSurface
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PlayerOverflowOptionsSheet(
+    accentColor: Color,
+    preferredProvider: String,
+    isFocusMode: Boolean,
+    onDismiss: () -> Unit,
+    onOpenStyleSheet: () -> Unit,
+    onRefreshLyrics: () -> Unit,
+    onToggleFocusMode: () -> Unit,
+    onSelectProvider: (String) -> Unit
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = Color(0xFF14171E),
+        scrimColor = SheetScrim,
+        dragHandle = { BottomSheetDefaults.DragHandle(color = TextMuted.copy(alpha = 0.5f)) }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 22.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Text(
+                text = "Параметры плеера",
+                style = MaterialTheme.typography.titleLarge.copy(color = TextPrimary)
+            )
+
+            Surface(
+                shape = RoundedCornerShape(18.dp),
+                color = Color(0xFF1C2029),
+                border = BorderStroke(0.5.dp, SpecularStroke),
+                modifier = Modifier.fillMaxWidth()
             ) {
-                DropdownMenuItem(
-                    text = { Text("Настройки стиля", color = TextPrimary) },
-                    leadingIcon = {
-                        Icon(Icons.Default.Palette, contentDescription = null, tint = accentColor)
-                    },
-                    onClick = onOpenStyleSheet
-                )
-                DropdownMenuItem(
-                    text = { Text("Обновить текст трека", color = TextPrimary) },
-                    leadingIcon = {
-                        Icon(Icons.Default.Refresh, contentDescription = null, tint = TextSecondary)
-                    },
-                    onClick = onRefreshLyrics
-                )
-                HorizontalDivider(thickness = 0.5.dp, color = HairlineDivider)
-                LYRICS_PROVIDERS.forEach { (id, label) ->
-                    val isSelected = preferredProvider == id
-                    DropdownMenuItem(
-                        text = {
-                            Text(
-                                text = label,
-                                color = if (isSelected) accentColor else TextSecondary,
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                        },
-                        trailingIcon = if (isSelected) {
-                            {
-                                Icon(
-                                    imageVector = Icons.Default.Check,
-                                    contentDescription = null,
-                                    tint = accentColor,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            }
-                        } else null,
-                        onClick = { onSelectProvider(id) }
+                Column {
+                    SheetOptionRow(
+                        icon = Icons.Default.Palette,
+                        title = "Настройки стиля",
+                        subtitle = "Обложка, фон, выравнивание, волна",
+                        tint = accentColor,
+                        onClick = onOpenStyleSheet
+                    )
+                    HorizontalDivider(thickness = 0.5.dp, color = HairlineDivider)
+                    SheetOptionRow(
+                        icon = Icons.Default.Refresh,
+                        title = "Обновить текст трека",
+                        subtitle = "Принудительно перепроверить источники",
+                        tint = TextSecondary,
+                        onClick = onRefreshLyrics
+                    )
+                    HorizontalDivider(thickness = 0.5.dp, color = HairlineDivider)
+                    SheetOptionRow(
+                        icon = Icons.Default.CenterFocusStrong,
+                        title = if (isFocusMode) "Выйти из режима экрана" else "Настольный режим (экран не гаснет)",
+                        subtitle = if (isFocusMode) "Вернуть элементы управления" else "Скрыть кнопки и не выключать дисплей",
+                        tint = if (isFocusMode) accentColor else TextSecondary,
+                        onClick = onToggleFocusMode
                     )
                 }
             }
+
+            Text(
+                text = "Источник текста",
+                style = MaterialTheme.typography.labelMedium.copy(color = TextMuted)
+            )
+
+            Surface(
+                shape = RoundedCornerShape(18.dp),
+                color = Color(0xFF1C2029),
+                border = BorderStroke(0.5.dp, SpecularStroke),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column {
+                    LYRICS_PROVIDERS.forEachIndexed { idx, (id, label) ->
+                        val isSelected = preferredProvider == id
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onSelectProvider(id) }
+                                .padding(horizontal = 16.dp, vertical = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = label,
+                                style = MaterialTheme.typography.bodyMedium.copy(
+                                    color = if (isSelected) accentColor else TextPrimary,
+                                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
+                                ),
+                                modifier = Modifier.weight(1f)
+                            )
+                            if (isSelected) {
+                                Icon(
+                                    imageVector = Icons.Default.Check,
+                                    contentDescription = "Выбран",
+                                    tint = accentColor,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                        if (idx < LYRICS_PROVIDERS.lastIndex) {
+                            HorizontalDivider(thickness = 0.5.dp, color = HairlineDivider)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SheetOptionRow(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    subtitle: String,
+    tint: Color,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 13.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Icon(imageVector = icon, contentDescription = null, tint = tint, modifier = Modifier.size(21.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyMedium.copy(color = TextPrimary, fontWeight = FontWeight.Medium)
+            )
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall.copy(color = TextMuted)
+            )
         }
     }
 }
@@ -1027,16 +1210,19 @@ private fun PlayerCoverStage(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun PlayerLyricsStage(
+    context: Context,
     track: NowPlayingData,
-    displayPositionMs: Long,
+    shownPositionMsState: State<Long>,
     syncOffsetMs: Int,
     effectiveAccent: Color,
     livingPalette: LivingPaletteState,
     lyricsState: PlayerLyricsUiState,
     onSeekToRawMs: (Long) -> Unit,
-    onRefreshLyrics: () -> Unit
+    onRefreshLyrics: () -> Unit,
+    onOpenProviderMenu: () -> Unit
 ) {
     val haptic = LocalHapticFeedback.current
     val scope = rememberCoroutineScope()
@@ -1118,16 +1304,24 @@ private fun PlayerLyricsStage(
                             style = MaterialTheme.typography.bodySmall.copy(color = TextMuted),
                             textAlign = TextAlign.Center
                         )
-                        GraphiteGlassButton(onClick = onRefreshLyrics) {
-                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Искать снова")
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            GraphiteGlassButton(onClick = onRefreshLyrics) {
+                                Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Искать снова")
+                            }
+                            GraphiteGlassButton(onClick = onOpenProviderMenu) {
+                                Text("Источник")
+                            }
                         }
                     }
                 } else if (res.synced && res.lines.isNotEmpty()) {
                     val listState = rememberLazyListState()
-                    val activeIndex = remember(res.lines, displayPositionMs) {
-                        findActiveLyricsLineIndex(res.lines, displayPositionMs)
+                    var viewportHeightPx by remember { mutableIntStateOf(0) }
+                    val activeIndex by remember(res.lines) {
+                        derivedStateOf {
+                            findActiveLyricsLineIndex(res.lines, shownPositionMsState.value)
+                        }
                     }
                     var lastUserScrollMs by remember { mutableLongStateOf(0L) }
                     LaunchedEffect(listState.isScrollInProgress) {
@@ -1136,25 +1330,33 @@ private fun PlayerLyricsStage(
                         }
                     }
 
-                    LaunchedEffect(activeIndex, res.lines) {
+                    LaunchedEffect(activeIndex, res.lines, viewportHeightPx) {
                         if (activeIndex >= 0) {
                             val now = SystemClock.uptimeMillis()
                             if (now - lastUserScrollMs > 3000L && !listState.isScrollInProgress) {
                                 runCatching {
+                                    // Anchor active line gently in the upper third (~28% from top)
+                                    val targetOffset = if (viewportHeightPx > 0) {
+                                        -(viewportHeightPx * 0.28f).toInt()
+                                    } else 0
                                     listState.animateScrollToItem(
-                                        index = (activeIndex - 1).coerceAtLeast(0),
-                                        scrollOffset = 0
+                                        index = activeIndex,
+                                        scrollOffset = targetOffset
                                     )
                                 }
                             }
                         }
                     }
 
-                    Box(modifier = Modifier.fillMaxSize()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .onSizeChanged { viewportHeightPx = it.height }
+                    ) {
                         LazyColumn(
                             state = listState,
-                            contentPadding = PaddingValues(top = 36.dp, bottom = 56.dp),
-                            verticalArrangement = Arrangement.spacedBy(16.dp),
+                            contentPadding = PaddingValues(top = 48.dp, bottom = 140.dp),
+                            verticalArrangement = Arrangement.spacedBy(18.dp),
                             modifier = Modifier
                                 .fillMaxSize()
                                 .lyricsVerticalEdgeFade()
@@ -1164,52 +1366,54 @@ private fun PlayerLyricsStage(
                                 items = res.lines,
                                 key = { idx, line -> "${idx}_${line.timeMs}" }
                             ) { index, line ->
-                                val isActive = index == activeIndex
-                                val isPassed = activeIndex >= 0 && index < activeIndex
-                                val lineScale by animateFloatAsState(
-                                    targetValue = if (isActive) 1.03f else 1.0f,
-                                    animationSpec = tween(220),
-                                    label = "lyric_scale"
-                                )
-                                val textColor = when {
-                                    isActive -> Color.White
-                                    isPassed -> Color.White.copy(alpha = 0.36f)
-                                    else -> Color.White.copy(alpha = 0.62f)
+                                val interlude = remember(res.lines, index) {
+                                    LyricsCatalogResolver.computeInterludeBefore(res.lines, index)
+                                }
+                                if (interlude != null) {
+                                    InterludeDotsIndicator(
+                                        interlude = interlude,
+                                        shownPositionMsState = shownPositionMsState,
+                                        timeSecondsState = livingPalette.uiTimeSecondsState,
+                                        accentColor = effectiveAccent
+                                    )
                                 }
 
-                                Text(
-                                    text = line.text,
-                                    style = MaterialTheme.typography.titleLarge.copy(
-                                        fontSize = if (isActive) 22.sp else 19.sp,
-                                        lineHeight = if (isActive) 30.sp else 27.sp,
-                                        fontWeight = if (isActive) FontWeight.Bold else FontWeight.SemiBold,
-                                        color = textColor
-                                    ),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .graphicsLayer {
-                                            scaleX = lineScale
-                                            scaleY = lineScale
-                                            transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0.5f)
+                                val nextLineTimeMs = res.lines.getOrNull(index + 1)?.timeMs
+                                    ?: (track.durationMs.takeIf { it > line.timeMs } ?: (line.timeMs + 4_500L))
+                                SyncedLyricLineRow(
+                                    line = line,
+                                    index = index,
+                                    activeIndex = activeIndex,
+                                    nextLineTimeMs = nextLineTimeMs,
+                                    shownPositionMsState = shownPositionMsState,
+                                    accentColor = effectiveAccent,
+                                    onSeekToLine = {
+                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                        val rawTarget = computeCompensatedSeekTargetMs(
+                                            targetDisplayMs = line.timeMs,
+                                            durationMs = track.durationMs,
+                                            syncOffsetMs = syncOffsetMs
+                                        )
+                                        onSeekToRawMs(rawTarget)
+                                        lastUserScrollMs = 0L
+                                    },
+                                    onCopyQuote = {
+                                        val quote = if (track.artist.isNotBlank()) {
+                                            "«${line.text}» — ${track.artist}"
+                                        } else {
+                                            "«${line.text}»"
                                         }
-                                        .clip(RoundedCornerShape(12.dp))
-                                        .clickable {
-                                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                            val rawTarget = computeCompensatedSeekTargetMs(
-                                                targetDisplayMs = line.timeMs,
-                                                durationMs = track.durationMs,
-                                                syncOffsetMs = syncOffsetMs
-                                            )
-                                            onSeekToRawMs(rawTarget)
-                                            lastUserScrollMs = 0L
-                                        }
-                                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                                        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                        cm.setPrimaryClip(ClipData.newPlainText("Lyric Quote", quote))
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        Toast.makeText(context, "Цитата скопирована", Toast.LENGTH_SHORT).show()
+                                    }
                                 )
                             }
 
                             item {
                                 Text(
-                                    text = "Источник: ${res.source.uppercase(Locale.US)} • Синхронный текст",
+                                    text = "Источник: ${res.source.uppercase(Locale.US)} • Синхронный текст • Долгое нажатие — копировать",
                                     style = MaterialTheme.typography.labelSmall.copy(color = TextMuted),
                                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 12.dp)
                                 )
@@ -1217,12 +1421,17 @@ private fun PlayerLyricsStage(
                         }
 
                         // "Jump back to current line" helper when user manually scrolls away
-                        val showResumeAutoScroll = activeIndex >= 0 &&
-                            SystemClock.uptimeMillis() - lastUserScrollMs <= 3000L
+                        val showResumeAutoScroll by remember(activeIndex) {
+                            derivedStateOf {
+                                activeIndex >= 0 &&
+                                    lastUserScrollMs > 0L &&
+                                    (SystemClock.uptimeMillis() - lastUserScrollMs <= 3000L)
+                            }
+                        }
                         if (showResumeAutoScroll) {
                             Surface(
                                 shape = RoundedCornerShape(999.dp),
-                                color = SheetSurface,
+                                color = Color(0xEE14171E),
                                 border = BorderStroke(0.75.dp, SpecularStroke),
                                 modifier = Modifier
                                     .align(Alignment.BottomCenter)
@@ -1231,13 +1440,16 @@ private fun PlayerLyricsStage(
                                     .clickable {
                                         lastUserScrollMs = 0L
                                         scope.launch {
-                                            listState.animateScrollToItem((activeIndex - 1).coerceAtLeast(0))
+                                            val targetOffset = if (viewportHeightPx > 0) {
+                                                -(viewportHeightPx * 0.28f).toInt()
+                                            } else 0
+                                            listState.animateScrollToItem(activeIndex.coerceAtLeast(0), targetOffset)
                                         }
                                     }
                             ) {
                                 Text(
                                     text = "К текущей строке",
-                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
                                     style = MaterialTheme.typography.labelSmall.copy(
                                         color = effectiveAccent,
                                         fontWeight = FontWeight.SemiBold
@@ -1247,34 +1459,100 @@ private fun PlayerLyricsStage(
                         }
                     }
                 } else {
-                    // Plain non-synced lyrics view
+                    // Honest Unsynced Lyrics UI (top frosted banner + clean manual scroll)
                     Column(
                         modifier = Modifier
                             .fillMaxSize()
                             .verticalScroll(rememberScrollState())
                             .lyricsVerticalEdgeFade()
-                            .padding(horizontal = 8.dp, vertical = 24.dp),
-                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                            .padding(horizontal = 6.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
                     ) {
                         Surface(
-                            shape = RoundedCornerShape(999.dp),
+                            shape = RoundedCornerShape(18.dp),
                             color = NestedSurface,
-                            border = BorderStroke(0.5.dp, SpecularStroke)
+                            border = BorderStroke(0.75.dp, SpecularStroke),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("unsynced_lyrics_banner")
                         ) {
-                            Text(
-                                text = "Без таймингов • ${res.source.uppercase(Locale.US)}",
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                                style = MaterialTheme.typography.labelSmall.copy(color = TextMuted)
-                            )
+                            Column(
+                                modifier = Modifier.padding(14.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Info,
+                                        contentDescription = null,
+                                        tint = SemanticAmber,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Text(
+                                        text = "Текст не синхронизирован с песней",
+                                        style = MaterialTheme.typography.labelLarge.copy(
+                                            color = TextPrimary,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    )
+                                }
+                                Text(
+                                    text = "Источник: ${res.source.uppercase(Locale.US)} • Прокручивайте вручную",
+                                    style = MaterialTheme.typography.bodySmall.copy(color = TextMuted)
+                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Surface(
+                                        shape = RoundedCornerShape(999.dp),
+                                        color = SecondaryGlass,
+                                        border = BorderStroke(0.5.dp, SpecularStroke),
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(999.dp))
+                                            .clickable(onClick = onRefreshLyrics)
+                                    ) {
+                                        Text(
+                                            text = "Проверить таймкоды",
+                                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                                            style = MaterialTheme.typography.labelSmall.copy(
+                                                color = effectiveAccent,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                        )
+                                    }
+                                    Surface(
+                                        shape = RoundedCornerShape(999.dp),
+                                        color = SecondaryGlass,
+                                        border = BorderStroke(0.5.dp, SpecularStroke),
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(999.dp))
+                                            .clickable(onClick = onOpenProviderMenu)
+                                    ) {
+                                        Text(
+                                            text = "Другой источник",
+                                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                                            style = MaterialTheme.typography.labelSmall.copy(
+                                                color = TextSecondary,
+                                                fontWeight = FontWeight.Medium
+                                            )
+                                        )
+                                    }
+                                }
+                            }
                         }
+
                         Text(
                             text = res.plainLyrics,
-                            style = MaterialTheme.typography.titleMedium.copy(
-                                fontSize = 19.sp,
-                                lineHeight = 29.sp,
-                                color = Color.White.copy(alpha = 0.88f),
-                                fontWeight = FontWeight.Medium
-                            )
+                            style = MaterialTheme.typography.bodyLarge.copy(
+                                fontSize = 18.sp,
+                                lineHeight = 28.sp,
+                                color = Color(0xFFE4E4E7),
+                                fontWeight = FontWeight.Normal
+                            ),
+                            modifier = Modifier.padding(horizontal = 4.dp)
                         )
                     }
                 }
@@ -1284,9 +1562,183 @@ private fun PlayerLyricsStage(
 }
 
 @Composable
+private fun InterludeDotsIndicator(
+    interlude: LyricsInterlude,
+    shownPositionMsState: State<Long>,
+    timeSecondsState: State<Float>,
+    accentColor: Color
+) {
+    val isActive by remember(interlude) {
+        derivedStateOf {
+            val pos = shownPositionMsState.value
+            pos in interlude.startMs until interlude.endMs
+        }
+    }
+    AnimatedVisibility(visible = isActive) {
+        Row(
+            modifier = Modifier
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            for (i in 0 until 3) {
+                Box(
+                    modifier = Modifier
+                        .size(8.dp)
+                        .graphicsLayer {
+                            val pos = shownPositionMsState.value
+                            val span = (interlude.endMs - interlude.startMs).coerceAtLeast(1L).toFloat()
+                            val overall = ((pos - interlude.startMs) / span).coerceIn(0f, 1f)
+                            val pulse = 0.55f + 0.45f * ((sin(timeSecondsState.value * 4.2f + i * 1.1f) + 1f) * 0.5f)
+                            val activeDot = if (overall >= i / 3f) 1.15f else 0.85f
+                            scaleX = pulse * activeDot
+                            scaleY = pulse * activeDot
+                            alpha = if (overall >= i / 3f) 0.95f else 0.42f
+                        }
+                        .clip(CircleShape)
+                        .background(accentColor)
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun SyncedLyricLineRow(
+    line: LyricsLine,
+    index: Int,
+    activeIndex: Int,
+    nextLineTimeMs: Long,
+    shownPositionMsState: State<Long>,
+    accentColor: Color,
+    onSeekToLine: () -> Unit,
+    onCopyQuote: () -> Unit
+) {
+    val distance = kotlin.math.abs(index - activeIndex)
+    val isActive = index == activeIndex
+
+    val targetScale = when {
+        isActive -> 1.04f
+        distance == 1 -> 0.97f
+        distance == 2 -> 0.96f
+        else -> 0.95f
+    }
+    val targetAlpha = when {
+        activeIndex < 0 -> 0.58f
+        isActive -> 1.0f
+        distance == 1 -> 0.50f
+        distance == 2 -> 0.30f
+        else -> 0.18f
+    }
+
+    val animSpec = remember {
+        spring<Float>(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow)
+    }
+    val lineScale by animateFloatAsState(targetValue = targetScale, animationSpec = animSpec, label = "lyric_scale")
+    val lineAlpha by animateFloatAsState(targetValue = targetAlpha, animationSpec = tween(260), label = "lyric_alpha")
+
+    val rowModifier = Modifier
+        .fillMaxWidth()
+        .graphicsLayer {
+            scaleX = lineScale
+            scaleY = lineScale
+            alpha = lineAlpha
+            transformOrigin = TransformOrigin(0f, 0.5f)
+        }
+        .clip(RoundedCornerShape(12.dp))
+        .combinedClickable(
+            onClick = onSeekToLine,
+            onLongClick = onCopyQuote
+        )
+        .padding(horizontal = 8.dp, vertical = 4.dp)
+
+    if (isActive && line.words.isNotEmpty()) {
+        val highlightedWordIdx by remember(line) {
+            derivedStateOf {
+                val pos = shownPositionMsState.value
+                var wIdx = 0
+                for (i in line.words.indices) {
+                    if (line.words[i].startMs <= pos) wIdx = i else break
+                }
+                wIdx
+            }
+        }
+        val annotated = remember(line.words, highlightedWordIdx, accentColor) {
+            buildAnnotatedString {
+                line.words.forEachIndexed { wIndex, w ->
+                    val style = when {
+                        wIndex < highlightedWordIdx -> SpanStyle(color = Color.White)
+                        wIndex == highlightedWordIdx -> SpanStyle(color = accentColor)
+                        else -> SpanStyle(color = Color.White.copy(alpha = 0.45f))
+                    }
+                    withStyle(style) {
+                        append(w.text)
+                    }
+                }
+            }
+        }
+        Text(
+            text = annotated,
+            style = MaterialTheme.typography.titleLarge.copy(
+                fontSize = 21.sp,
+                lineHeight = 29.sp,
+                fontWeight = FontWeight.Bold
+            ),
+            modifier = rowModifier
+        )
+    } else if (isActive) {
+        // Horizontal vocal sweep highlight across the active line with zero recompositions
+        val lineDuration = (nextLineTimeMs - line.timeMs).coerceIn(900L, 12_000L).toFloat()
+        Text(
+            text = line.text,
+            style = MaterialTheme.typography.titleLarge.copy(
+                fontSize = 21.sp,
+                lineHeight = 29.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color.White
+            ),
+            modifier = rowModifier
+                .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)
+                .drawWithContent {
+                    drawContent()
+                    val pos = shownPositionMsState.value
+                    val progress = ((pos - line.timeMs).toFloat() / lineDuration).coerceIn(0f, 1f)
+                    val edgeEnd = (progress + 0.10f).coerceIn(0.02f, 1f)
+                    drawRect(
+                        brush = Brush.horizontalGradient(
+                            colorStops = arrayOf(
+                                0.0f to Color.White,
+                                progress.coerceIn(0f, 0.98f) to Color.White,
+                                edgeEnd to Color.White.copy(alpha = 0.56f),
+                                1.0f to Color.White.copy(alpha = 0.56f)
+                            ),
+                            startX = 0f,
+                            endX = size.width.coerceAtLeast(1f)
+                        ),
+                        size = Size(size.width, size.height),
+                        blendMode = BlendMode.Modulate
+                    )
+                }
+        )
+    } else {
+        Text(
+            text = line.text,
+            style = MaterialTheme.typography.titleLarge.copy(
+                fontSize = 21.sp,
+                lineHeight = 29.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = Color.White
+            ),
+            modifier = rowModifier
+        )
+    }
+}
+
+@Composable
 private fun PlayerSeekSection(
     track: NowPlayingData,
-    shownPositionMs: Long,
+    shownPositionMsState: State<Long>,
     accentColor: Color,
     wavyEnabled: Boolean,
     showRemainingTime: Boolean,
@@ -1295,6 +1747,7 @@ private fun PlayerSeekSection(
     onScrubMove: (Long) -> Unit,
     onScrubEnd: (Long) -> Unit
 ) {
+    val shownPositionMs = shownPositionMsState.value
     val duration = track.durationMs.coerceAtLeast(0L)
     val fraction = if (duration > 0L) (shownPositionMs.toFloat() / duration.toFloat()).coerceIn(0f, 1f) else 0f
     var barWidthPx by remember { mutableIntStateOf(1) }
@@ -1725,21 +2178,26 @@ private fun PlayerStyleSettingsSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = SheetSurface,
-        scrimColor = SheetScrim,
+        containerColor = Color(0xF512151C),
+        scrimColor = Color.Black.copy(alpha = 0.25f),
         dragHandle = { BottomSheetDefaults.DragHandle(color = TextMuted.copy(alpha = 0.5f)) }
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .heightIn(max = 420.dp)
+                .verticalScroll(rememberScrollState())
                 .navigationBarsPadding()
                 .padding(horizontal = 20.dp)
-                .padding(bottom = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+                .padding(bottom = 18.dp),
+            verticalArrangement = Arrangement.spacedBy(11.dp)
         ) {
             Text(
-                text = "Стиль встроенного плеера",
-                style = MaterialTheme.typography.titleLarge.copy(color = TextPrimary)
+                text = "Стиль плеера (живое превью)",
+                style = MaterialTheme.typography.titleMedium.copy(
+                    color = TextPrimary,
+                    fontWeight = FontWeight.SemiBold
+                )
             )
 
             StyleChipSection(

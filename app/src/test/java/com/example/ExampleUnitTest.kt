@@ -546,6 +546,99 @@ class ExampleUnitTest {
             com.example.ui.components.computeCompensatedSeekTargetMs(179_800L, 180_000L, -500)
         )
     }
+
+    @Test
+    fun `verify LyricsCatalogResolver parses enhanced word tags and balanced Genius nested divs`() {
+        val enhancedLrc = """
+            [00:12.00]<00:12.00>Hello <00:12.50>world <00:13.20>today
+            [00:20.00][00:40.00]<00:20.00>Chorus <00:20.60>line
+        """.trimIndent()
+        val parsed = com.example.lyrics.LyricsCatalogResolver.parseLrcLines(enhancedLrc)
+        assertEquals(3, parsed.size)
+        assertEquals("Hello world today", parsed[0].text)
+        assertEquals(3, parsed[0].words.size)
+        assertEquals(12_000L, parsed[0].words[0].startMs)
+        assertEquals("Hello", parsed[0].words[0].text.trim())
+        assertEquals(12_500L, parsed[0].words[1].startMs)
+        assertEquals("world", parsed[0].words[1].text.trim())
+        assertEquals(13_200L, parsed[0].words[2].startMs)
+        assertEquals("today", parsed[0].words[2].text.trim())
+
+        // Second chorus timestamp [00:40.00] preserves shifted word offsets relative to 20s -> 40s
+        assertEquals("Chorus line", parsed[2].text)
+        assertEquals(40_000L, parsed[2].words[0].startMs)
+        assertEquals(40_600L, parsed[2].words[1].startMs)
+
+        // Nested <div> inside Genius lyrics-container must NOT terminate lyrics extraction early
+        val nestedGeniusHtml = """
+            <html><body>
+              <div data-lyrics-container="true">
+                <div class="LyricsHeader"><div>12 Contributors</div></div>
+                [Куплет 1]<br/>Первая строка &#8217;тест&#8217;<br/>
+                <div class="InlineAnnotation"><div>annotation note</div></div>
+                Вторая строка &mdash; продолжение
+              </div>
+              <div data-lyrics-container="true">Финальный куплет</div>
+            </body></html>
+        """.trimIndent()
+        val extracted = com.example.lyrics.LyricsCatalogResolver.extractGeniusHtmlLyrics(nestedGeniusHtml)
+        assertTrue(extracted.contains("Первая строка ’тест’"))
+        assertTrue(extracted.contains("Вторая строка — продолжение"))
+        assertTrue(extracted.contains("Финальный куплет"))
+    }
+
+    @Test
+    fun `verify LyricsCatalogResolver computeInterludeBefore detects intro and long breaks`() {
+        val lines = listOf(
+            com.example.lyrics.LyricsLine(6_000L, "Intro ends"),
+            com.example.lyrics.LyricsLine(10_000L, "Normal gap 4s"),
+            com.example.lyrics.LyricsLine(18_000L, "After 8s instrumental break")
+        )
+        val intro = com.example.lyrics.LyricsCatalogResolver.computeInterludeBefore(lines, 0)
+        assertEquals(0L, intro?.startMs)
+        assertEquals(6_000L, intro?.endMs)
+
+        assertEquals(null, com.example.lyrics.LyricsCatalogResolver.computeInterludeBefore(lines, 1))
+
+        val midBreak = com.example.lyrics.LyricsCatalogResolver.computeInterludeBefore(lines, 2)
+        assertEquals(12_200L, midBreak?.startMs)
+        assertEquals(18_000L, midBreak?.endMs)
+    }
+
+    @Test
+    fun `verify BridgeAppUpdater parses changelog, commit metadata helpers, and ConditionalHttpResult`() {
+        val json = """
+            {
+              "versionCode": 9,
+              "versionName": "3.1.0",
+              "apkName": "ClawdBridge.apk",
+              "changelog": ["120 Гц шейдеры", "Авто-обновление раз в 10 мин"]
+            }
+        """.trimIndent()
+        val parsed = com.example.updater.BridgeAppUpdater.parseVersionJson(json)
+        assertEquals(2, parsed?.changelog?.size)
+        assertEquals("120 Гц шейдеры", parsed?.changelog?.firstOrNull())
+
+        val prioritized = com.example.updater.BridgeAppUpdater.buildChangelogItems(
+            versionJsonChangelog = listOf("Пункт из version.json"),
+            commitMessages = listOf("Commit 1"),
+            releaseBody = "- Body line 1\n- Body line 2"
+        )
+        assertEquals(listOf("Пункт из version.json"), prioritized)
+
+        val formattedDate = com.example.updater.BridgeAppUpdater.formatCommitDateLabel("2026-11-14T15:30:00Z")
+        assertTrue(formattedDate.isNotBlank())
+        assertTrue(formattedDate.contains(":"))
+
+        val notModifiedRes = com.example.network.BridgeHttpClient.ConditionalHttpResult(
+            code = 304,
+            body = null,
+            etag = "\"abc123\"",
+            notModified = true
+        )
+        assertTrue(notModifiedRes.notModified)
+        assertEquals(304, notModifiedRes.code)
+    }
 }
 
 

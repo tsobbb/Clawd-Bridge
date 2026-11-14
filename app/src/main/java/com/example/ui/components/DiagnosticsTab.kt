@@ -163,6 +163,8 @@ fun DiagnosticsTab(
     onBackgroundStyleChange: (BackgroundStyle) -> Unit,
     onSliderDragChange: (Boolean) -> Unit = {},
     onForceRebind: () -> Unit,
+    openUpdateSheetRequested: Boolean = false,
+    onConsumeOpenUpdateSheet: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val coroutineScope = rememberCoroutineScope()
@@ -247,7 +249,9 @@ fun DiagnosticsTab(
             onToggleDynamicBackground = onToggleDynamicBackground,
             backgroundStyle = backgroundStyle,
             onBackgroundStyleChange = onBackgroundStyleChange,
-            onForceRebind = onForceRebind
+            onForceRebind = onForceRebind,
+            openUpdateSheetRequested = openUpdateSheetRequested,
+            onConsumeOpenUpdateSheet = onConsumeOpenUpdateSheet
         )
     }
 

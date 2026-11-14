@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -130,6 +131,8 @@ private val BRIDGE_TABS = listOf(
 )
 
 class MainActivity : ComponentActivity() {
+    private val openUpdateSheetSignal = mutableIntStateOf(0)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge(
@@ -142,17 +145,31 @@ class MainActivity : ComponentActivity() {
         LocalHttpServer.start()
         MediaBridgeForegroundService.start(this)
         NotificationRebindHelper.rebindService(this)
+        handleIncomingIntent(intent)
 
         setContent {
             ClawdBridgeTheme {
-                ClawdBridgeMainApp()
+                ClawdBridgeMainApp(openUpdateSheetTrigger = openUpdateSheetSignal.intValue)
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIncomingIntent(intent)
+    }
+
+    private fun handleIncomingIntent(intent: Intent?) {
+        if (intent?.getBooleanExtra(BridgeAppUpdater.EXTRA_OPEN_UPDATE_SHEET, false) == true) {
+            intent.removeExtra(BridgeAppUpdater.EXTRA_OPEN_UPDATE_SHEET)
+            openUpdateSheetSignal.intValue += 1
         }
     }
 }
 
 @Composable
-fun ClawdBridgeMainApp() {
+fun ClawdBridgeMainApp(openUpdateSheetTrigger: Int = 0) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val haptic = LocalHapticFeedback.current
@@ -161,6 +178,15 @@ fun ClawdBridgeMainApp() {
     val pagerState = rememberPagerState(initialPage = 0, pageCount = { BRIDGE_TABS.size })
     var isSliderDragging by remember { mutableStateOf(false) }
     var isFullscreenPlayerOpen by remember { mutableStateOf(false) }
+    var pendingUpdateSheet by remember { mutableStateOf(false) }
+
+    LaunchedEffect(openUpdateSheetTrigger) {
+        if (openUpdateSheetTrigger > 0) {
+            pendingUpdateSheet = true
+            isFullscreenPlayerOpen = false
+            pagerState.animateScrollToPage(2)
+        }
+    }
 
     BackHandler(enabled = !isFullscreenPlayerOpen && pagerState.currentPage != 0) {
         uiScope.launch { pagerState.animateScrollToPage(0) }
@@ -202,11 +228,16 @@ fun ClawdBridgeMainApp() {
         }
     }
 
+    val hideRootBackdrop = isFullscreenPlayerOpen &&
+        playerUiState.hasMedia &&
+        playerStyleConfig.backgroundMode != com.example.state.PlayerBackgroundMode.GRADIENT
+
     val livingPalette = rememberLivingPaletteState(
         liveState = if (isFullscreenPlayerOpen && playerUiState.hasMedia) playerUiState else liveState,
         artworkBitmap = artworkBitmap,
         dynamicBackgroundEnabled = dynamicBackgroundEnabled,
-        backgroundStyle = backgroundStyle
+        backgroundStyle = backgroundStyle,
+        suppressBackgroundMotion = hideRootBackdrop
     )
 
     var isNotificationAccessGranted by remember {
@@ -243,6 +274,7 @@ fun ClawdBridgeMainApp() {
                 NotificationRebindHelper.rebindService(context)
                 MediaBridgeStateHolder.refreshSnapshot()
                 BridgeAppUpdater.retryInstallIfPermitted(context)
+                BridgeAppUpdater.checkIfIntervalElapsed(context)
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -273,7 +305,9 @@ fun ClawdBridgeMainApp() {
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        LivingAuroraBackdrop(palette = livingPalette)
+        if (!hideRootBackdrop) {
+            LivingAuroraBackdrop(palette = livingPalette)
+        }
 
         Scaffold(
             modifier = Modifier
@@ -379,7 +413,9 @@ fun ClawdBridgeMainApp() {
                                 backgroundStyle = backgroundStyle,
                                 onBackgroundStyleChange = { MediaBridgeStateHolder.setBackgroundStyle(it) },
                                 onSliderDragChange = { isSliderDragging = it },
-                                onForceRebind = forceRebindAction
+                                onForceRebind = forceRebindAction,
+                                openUpdateSheetRequested = pendingUpdateSheet,
+                                onConsumeOpenUpdateSheet = { pendingUpdateSheet = false }
                             )
                         }
                         Spacer(modifier = Modifier.height(6.dp))

@@ -1,14 +1,23 @@
 package com.example.updater
 
+import android.Manifest
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageInstaller
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import android.util.Log
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import com.example.BuildConfig
+import com.example.MainActivity
+import com.example.R
 import com.example.network.BridgeHttpClient
 import com.example.plugin.PluginDownloader
 import kotlinx.coroutines.CoroutineScope
@@ -25,7 +34,9 @@ import org.json.JSONObject
 import java.io.File
 import java.io.FileInputStream
 import java.security.MessageDigest
+import java.text.SimpleDateFormat
 import java.util.Locale
+import java.util.TimeZone
 
 data class RemoteApkRelease(
     val sourceLabel: String,
@@ -36,7 +47,13 @@ data class RemoteApkRelease(
     val sizeBytes: Long,
     val remoteSha: String = "",
     val isUpdateAvailable: Boolean,
-    val isRebuildWithSameVersion: Boolean = false
+    val isRebuildWithSameVersion: Boolean = false,
+    val commitShaShort: String = "",
+    val commitDateIso: String = "",
+    val commitAuthor: String = "",
+    val commitMessage: String = "",
+    val changelogItems: List<String> = emptyList(),
+    val checkedAtMs: Long = System.currentTimeMillis()
 )
 
 sealed class BridgeUpdateState {
@@ -62,9 +79,11 @@ sealed class BridgeUpdateState {
 /**
  * Hybrid In-App APK Updater for https://github.com/tsobbb/Clawd-Bridge.
  * 1) Checks /releases/latest for .apk assets (comparing semver against BuildConfig.VERSION_NAME).
- * 2) Falls back to main branch: raw/main/version.json (with cache-buster) -> raw/main/app/build.gradle.kts,
- *    plus /contents/... metadata and raw/main/ClawdBridge.apk download.
- * 3) Installs natively via PackageInstaller.Session + InstallStatusReceiver (STATUS_PENDING_USER_ACTION).
+ * 2) Falls back to main branch: raw/main/version.json -> raw/main/app/build.gradle.kts,
+ *    plus /contents metadata and commit/changelog details.
+ * 3) Supports HTTP ETag (If-None-Match -> 304 Not Modified) for 10-minute background polling
+ *    with 0 GitHub rate-limit waste and deduplicated update notifications.
+ * 4) Installs natively via PackageInstaller.Session + InstallStatusReceiver.
  */
 object BridgeAppUpdater {
 
@@ -72,12 +91,24 @@ object BridgeAppUpdater {
     const val REPO_OWNER = "tsobbb"
     const val REPO_NAME = "Clawd-Bridge"
     const val REPO_URL = "https://github.com/$REPO_OWNER/$REPO_NAME"
+    const val AUTO_CHECK_INTERVAL_MS = 10 * 60 * 1000L
+    const val EXTRA_OPEN_UPDATE_SHEET = "open_update_sheet"
+
+    private const val UPDATE_CHANNEL_ID = "clawd_bridge_updates_channel"
+    private const val UPDATE_CHANNEL_NAME = "Обновления Clawd Bridge"
+    private const val UPDATE_NOTIFICATION_ID = 44445
+
     private const val DEFAULT_APK_NAME = "ClawdBridge.apk"
     private const val UPDATES_SUBDIR = "updates"
     private const val PREFS_NAME = "clawd_updater_prefs"
     private const val KEY_PENDING_SHA = "pending_install_sha"
     private const val KEY_INSTALLED_SHA = "last_installed_sha"
     private const val KEY_INSTALLED_VER_CODE = "last_installed_version_code"
+    private const val KEY_LAST_CHECK_AT_MS = "last_check_at_ms"
+    private const val KEY_LAST_NOTIFIED_KEY = "last_notified_update_key"
+    private const val KEY_ETAG_RELEASES = "etag_releases_latest"
+    private const val KEY_ETAG_APK_CONTENTS = "etag_main_apk_contents"
+    private const val KEY_ETAG_VERSION_JSON = "etag_main_version_json"
 
     private val ioScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var activeJob: Job? = null
@@ -91,19 +122,34 @@ object BridgeAppUpdater {
     @Volatile
     private var lastReleaseMeta: RemoteApkRelease? = null
 
-    fun checkForUpdates(context: Context) {
+    fun checkForUpdates(context: Context, isBackground: Boolean = false) {
+        val cur = _state.value
+        if (cur is BridgeUpdateState.Downloading || cur is BridgeUpdateState.Installing) {
+            return
+        }
         if (activeJob?.isActive == true) return
         val appCtx = context.applicationContext
+        val prefs = appCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (isBackground) {
+            val lastCheck = prefs.getLong(KEY_LAST_CHECK_AT_MS, 0L)
+            if (lastCheck > 0L && (System.currentTimeMillis() - lastCheck) < 60_000L) {
+                return
+            }
+        }
+
         activeJob = ioScope.launch {
-            _state.value = BridgeUpdateState.Checking
+            if (!isBackground) {
+                _state.value = BridgeUpdateState.Checking
+            }
             try {
                 val token = PluginDownloader.getSavedToken(appCtx)
                 val localFingerprint = readLocalApkFingerprint(appCtx)
-                val prefs = appCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 val lastInstalledSha = prefs.getString(KEY_INSTALLED_SHA, null)
                 val lastInstalledVerCode = prefs.getInt(KEY_INSTALLED_VER_CODE, -1)
 
                 val release = fetchLatestBridgeRelease(
+                    prefs = prefs,
+                    useEtag = isBackground,
                     currentVersionCode = BuildConfig.VERSION_CODE,
                     currentVersionName = BuildConfig.VERSION_NAME,
                     localSize = localFingerprint.sizeBytes,
@@ -112,22 +158,40 @@ object BridgeAppUpdater {
                     lastInstalledVersionCode = lastInstalledVerCode,
                     githubToken = token
                 )
+                prefs.edit().putLong(KEY_LAST_CHECK_AT_MS, System.currentTimeMillis()).apply()
+
                 if (release == null) {
-                    _state.value = BridgeUpdateState.Error("APK не найден в релизах или ветке main")
+                    if (!isBackground) {
+                        _state.value = BridgeUpdateState.Error("APK не найден в релизах или ветке main")
+                    }
                     return@launch
                 }
+
                 lastReleaseMeta = release
                 if (release.isUpdateAvailable) {
                     _state.value = BridgeUpdateState.UpdateAvailable(release)
+                    if (isBackground) {
+                        postUpdateNotificationIfNew(appCtx, prefs, release)
+                    }
                 } else {
                     _state.value = BridgeUpdateState.UpToDate(
                         release.versionName.ifBlank { BuildConfig.VERSION_NAME }
                     )
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Update check failed: ${e.message}", e)
-                _state.value = BridgeUpdateState.Error(e.message ?: "Не удалось проверить обновления")
+                Log.e(TAG, "Update check failed (bg=$isBackground): ${e.message}", e)
+                if (!isBackground) {
+                    _state.value = BridgeUpdateState.Error(e.message ?: "Не удалось проверить обновления")
+                }
             }
+        }
+    }
+
+    fun checkIfIntervalElapsed(context: Context) {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val last = prefs.getLong(KEY_LAST_CHECK_AT_MS, 0L)
+        if ((System.currentTimeMillis() - last) >= AUTO_CHECK_INTERVAL_MS) {
+            checkForUpdates(context, isBackground = true)
         }
     }
 
@@ -236,6 +300,82 @@ object BridgeAppUpdater {
         }
     }
 
+    private fun postUpdateNotificationIfNew(
+        context: Context,
+        prefs: android.content.SharedPreferences,
+        release: RemoteApkRelease
+    ) {
+        val uniqueKey = "${release.remoteSha}|${release.versionName}|${release.sizeBytes}"
+        if (prefs.getString(KEY_LAST_NOTIFIED_KEY, null) == uniqueKey) return
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!granted) return
+        }
+
+        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            manager.getNotificationChannel(UPDATE_CHANNEL_ID) == null
+        ) {
+            val channel = NotificationChannel(
+                UPDATE_CHANNEL_ID,
+                UPDATE_CHANNEL_NAME,
+                NotificationManager.IMPORTANCE_DEFAULT
+            ).apply {
+                description = "Уведомления о новых сборках Clawd Bridge на GitHub"
+            }
+            manager.createNotificationChannel(channel)
+        }
+
+        val openIntent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra(EXTRA_OPEN_UPDATE_SHEET, true)
+        }
+        val piFlags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        val contentPending = PendingIntent.getActivity(context, 441, openIntent, piFlags)
+
+        val sizeText = if (release.sizeBytes > 0) {
+            String.format(Locale.US, " • %.1f МБ", release.sizeBytes / (1024.0 * 1024.0))
+        } else ""
+        val title = "Доступно обновление Clawd Bridge ${release.versionName}$sizeText"
+        val details = buildString {
+            if (release.commitMessage.isNotBlank()) {
+                append(release.commitMessage.lineSequence().firstOrNull().orEmpty())
+            }
+            if (release.changelogItems.isNotEmpty()) {
+                if (isNotEmpty()) append("\n")
+                release.changelogItems.take(3).forEachIndexed { idx, line ->
+                    if (idx > 0) append("\n")
+                    append("• ").append(line)
+                }
+            }
+            if (isEmpty()) {
+                append("Нажмите «Обновить», чтобы посмотреть изменения и установить сборку.")
+            }
+        }
+
+        val notification = NotificationCompat.Builder(context, UPDATE_CHANNEL_ID)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle(title)
+            .setContentText(details.lineSequence().firstOrNull() ?: details)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(details))
+            .setContentIntent(contentPending)
+            .setAutoCancel(true)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .addAction(0, "Обновить", contentPending)
+            .build()
+
+        runCatching {
+            NotificationManagerCompat.from(context).notify(UPDATE_NOTIFICATION_ID, notification)
+            prefs.edit().putString(KEY_LAST_NOTIFIED_KEY, uniqueKey).apply()
+        }.onFailure {
+            Log.w(TAG, "Failed to post update notification: ${it.message}")
+        }
+    }
+
     private suspend fun installDownloadedApk(
         context: Context,
         apkFile: File,
@@ -271,7 +411,6 @@ object BridgeAppUpdater {
                     session.fsync(out)
                 }
 
-                // Nuance #1: Explicit BroadcastReceiver Intent with FLAG_MUTABLE | FLAG_UPDATE_CURRENT
                 val callbackIntent = Intent(appCtx, InstallStatusReceiver::class.java)
                 val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                     PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
@@ -298,6 +437,8 @@ object BridgeAppUpdater {
     }
 
     private suspend fun fetchLatestBridgeRelease(
+        prefs: android.content.SharedPreferences,
+        useEtag: Boolean,
         currentVersionCode: Int,
         currentVersionName: String,
         localSize: Long,
@@ -306,8 +447,9 @@ object BridgeAppUpdater {
         lastInstalledVersionCode: Int,
         githubToken: String
     ): RemoteApkRelease? = withContext(Dispatchers.IO) {
-        // Step 1: Check GitHub Releases /latest (filter strictly for .apk, compare semver with VERSION_NAME)
         val releaseCandidate = tryFetchFromReleasesLatest(
+            prefs = prefs,
+            useEtag = useEtag,
             currentVersionName = currentVersionName,
             localSize = localSize,
             token = githubToken
@@ -316,8 +458,9 @@ object BridgeAppUpdater {
             return@withContext releaseCandidate
         }
 
-        // Step 2: Fallback to main branch (version.json -> app/build.gradle.kts + /contents for APK size & git blob sha)
         tryFetchFromMainBranch(
+            prefs = prefs,
+            useEtag = useEtag,
             currentVersionCode = currentVersionCode,
             currentVersionName = currentVersionName,
             localSize = localSize,
@@ -329,15 +472,30 @@ object BridgeAppUpdater {
     }
 
     private fun tryFetchFromReleasesLatest(
+        prefs: android.content.SharedPreferences,
+        useEtag: Boolean,
         currentVersionName: String,
         localSize: Long,
         token: String
     ): RemoteApkRelease? {
-        val cacheBust = System.currentTimeMillis()
-        val url = "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases/latest?_=$cacheBust"
-        val body = httpGetText(url, token = token, acceptJson = true, noCache = true) ?: return null
+        val url = if (useEtag) {
+            "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases/latest"
+        } else {
+            "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases/latest?_=${System.currentTimeMillis()}"
+        }
+        val prevEtag = if (useEtag) prefs.getString(KEY_ETAG_RELEASES, null) else null
+        val res = httpGetWithEtag(url, token = token, acceptJson = true, ifNoneMatch = prevEtag, noCache = !useEtag)
+        if (res.notModified) {
+            return lastReleaseMeta?.takeIf { it.sourceLabel.startsWith("GitHub Releases") }
+        }
+        res.etag?.let { prefs.edit().putString(KEY_ETAG_RELEASES, it).apply() }
+        val body = res.body ?: return null
         val json = runCatching { JSONObject(body) }.getOrNull() ?: return null
         val tagName = json.optString("tag_name").trim()
+        val releaseName = json.optString("name").trim()
+        val releaseBody = json.optString("body").trim()
+        val publishedAt = json.optString("published_at").trim()
+        val authorLogin = json.optJSONObject("author")?.optString("login").orEmpty()
         val assets = json.optJSONArray("assets") ?: return null
 
         var bestApkName = ""
@@ -359,7 +517,6 @@ object BridgeAppUpdater {
 
         if (bestUrl.isBlank()) return null
 
-        // Nuance #3: Releases API has tag_name semver (no integer versionCode) -> compare semver vs VERSION_NAME
         val cleanRemoteVer = normalizeVersionLabel(tagName)
         val semverCmp = if (cleanRemoteVer.isNotBlank()) {
             compareSemver(cleanRemoteVer, currentVersionName)
@@ -372,6 +529,12 @@ object BridgeAppUpdater {
             else -> false
         }
 
+        val changelog = buildChangelogItems(
+            versionJsonChangelog = emptyList(),
+            commitMessages = emptyList(),
+            releaseBody = releaseBody
+        )
+
         return RemoteApkRelease(
             sourceLabel = "GitHub Releases ($tagName)",
             versionCode = null,
@@ -381,11 +544,18 @@ object BridgeAppUpdater {
             sizeBytes = bestSize,
             remoteSha = "",
             isUpdateAvailable = isNewer,
-            isRebuildWithSameVersion = sizeRebuild
+            isRebuildWithSameVersion = sizeRebuild,
+            commitShaShort = tagName.take(12),
+            commitDateIso = publishedAt,
+            commitAuthor = authorLogin,
+            commitMessage = releaseName.ifBlank { "Релиз $tagName" },
+            changelogItems = changelog
         )
     }
 
     private fun tryFetchFromMainBranch(
+        prefs: android.content.SharedPreferences,
+        useEtag: Boolean,
         currentVersionCode: Int,
         currentVersionName: String,
         localSize: Long,
@@ -395,18 +565,28 @@ object BridgeAppUpdater {
         token: String
     ): RemoteApkRelease? {
         val cacheBust = System.currentTimeMillis()
-        // Nuance #2: Cache-buster query & Cache-Control: no-cache for version.json
-        val versionJsonUrl = "https://raw.githubusercontent.com/$REPO_OWNER/$REPO_NAME/main/version.json?t=$cacheBust"
-        val versionJsonText = httpGetText(versionJsonUrl, token = token, acceptJson = false, noCache = true)
-        var parsedMeta = versionJsonText?.let { parseVersionJson(it) }
+        val versionJsonUrl = if (useEtag) {
+            "https://raw.githubusercontent.com/$REPO_OWNER/$REPO_NAME/main/version.json"
+        } else {
+            "https://raw.githubusercontent.com/$REPO_OWNER/$REPO_NAME/main/version.json?t=$cacheBust"
+        }
+        val prevVerEtag = if (useEtag) prefs.getString(KEY_ETAG_VERSION_JSON, null) else null
+        val versionRes = httpGetWithEtag(
+            versionJsonUrl,
+            token = token,
+            acceptJson = false,
+            ifNoneMatch = prevVerEtag,
+            noCache = !useEtag
+        )
+        if (!versionRes.notModified) {
+            versionRes.etag?.let { prefs.edit().putString(KEY_ETAG_VERSION_JSON, it).apply() }
+        }
+        var parsedMeta = versionRes.body?.let { parseVersionJson(it) }
 
-        // Nuance #2: Fallback parsing MUST read app/build.gradle.kts (NOT root build.gradle.kts)
-        if (parsedMeta == null) {
+        if (parsedMeta == null && !versionRes.notModified) {
             val gradleUrl = "https://raw.githubusercontent.com/$REPO_OWNER/$REPO_NAME/main/app/build.gradle.kts?t=$cacheBust"
-            val gradleText = httpGetText(gradleUrl, token = token, acceptJson = false, noCache = true)
-            if (gradleText != null) {
-                parsedMeta = parseGradleVersionInfo(gradleText)
-            }
+            val gradleRes = httpGetWithEtag(gradleUrl, token = token, acceptJson = false, ifNoneMatch = null, noCache = true)
+            gradleRes.body?.let { parsedMeta = parseGradleVersionInfo(it) }
         }
 
         val targetApkName = parsedMeta?.apkName?.ifBlank { DEFAULT_APK_NAME } ?: DEFAULT_APK_NAME
@@ -416,9 +596,27 @@ object BridgeAppUpdater {
         var foundSize = -1L
         var foundSha = ""
 
-        // Step A: Direct GitHub Contents API check on exact targetApkName (returns exact size + git blob sha)
-        val singleContentUrl = "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/contents/$targetApkName?ref=main&_=$cacheBust"
-        httpGetText(singleContentUrl, token = token, acceptJson = true, noCache = true)?.let { body ->
+        val singleContentUrl = if (useEtag) {
+            "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/contents/$targetApkName?ref=main"
+        } else {
+            "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/contents/$targetApkName?ref=main&_=$cacheBust"
+        }
+        val prevApkEtag = if (useEtag) prefs.getString(KEY_ETAG_APK_CONTENTS, null) else null
+        val apkContentRes = httpGetWithEtag(
+            singleContentUrl,
+            token = token,
+            acceptJson = true,
+            ifNoneMatch = prevApkEtag,
+            noCache = !useEtag
+        )
+        if (apkContentRes.notModified && versionRes.notModified && lastReleaseMeta != null) {
+            return lastReleaseMeta
+        }
+        if (!apkContentRes.notModified) {
+            apkContentRes.etag?.let { prefs.edit().putString(KEY_ETAG_APK_CONTENTS, it).apply() }
+        }
+
+        apkContentRes.body?.let { body ->
             runCatching {
                 val obj = JSONObject(body)
                 if (obj.optString("type") == "file") {
@@ -431,11 +629,10 @@ object BridgeAppUpdater {
             }
         }
 
-        // Step B: Fallback to root /contents?ref=main if exact filename wasn't matched
         if (foundSize <= 0L) {
             val contentsRootUrl = "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/contents?ref=main&_=$cacheBust"
-            val contentsText = httpGetText(contentsRootUrl, token = token, acceptJson = true, noCache = true)
-            if (contentsText != null) {
+            val contentsRes = httpGetWithEtag(contentsRootUrl, token = token, acceptJson = true, ifNoneMatch = null, noCache = true)
+            contentsRes.body?.let { contentsText ->
                 runCatching {
                     val arr = JSONArray(contentsText)
                     val apkCandidates = mutableListOf<JSONObject>()
@@ -480,6 +677,57 @@ object BridgeAppUpdater {
             lastInstalledVersionCode = lastInstalledVersionCode
         )
 
+        var commitShaShort = ""
+        var commitDateIso = ""
+        var commitAuthor = ""
+        var commitMessage = ""
+        val recentCommitMessages = mutableListOf<String>()
+
+        if (evaluation.isUpdateAvailable || !useEtag) {
+            // Fetch latest commit touching the APK
+            val apkCommitUrl = "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/commits?path=$foundApkName&sha=main&per_page=1"
+            httpGetWithEtag(apkCommitUrl, token = token, acceptJson = true, ifNoneMatch = null, noCache = false).body?.let { jsonBody ->
+                runCatching {
+                    val arr = JSONArray(jsonBody)
+                    val first = arr.optJSONObject(0)
+                    if (first != null) {
+                        commitShaShort = first.optString("sha").take(7)
+                        val commitObj = first.optJSONObject("commit")
+                        commitMessage = commitObj?.optString("message").orEmpty().trim()
+                        val authorObj = commitObj?.optJSONObject("author")
+                        commitAuthor = authorObj?.optString("name").orEmpty().trim()
+                        commitDateIso = authorObj?.optString("date").orEmpty().trim()
+                    }
+                }
+            }
+
+            // Fetch recent commits on main for short important changelog bullets
+            val recentCommitsUrl = "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/commits?sha=main&per_page=6"
+            httpGetWithEtag(recentCommitsUrl, token = token, acceptJson = true, ifNoneMatch = null, noCache = false).body?.let { jsonBody ->
+                runCatching {
+                    val arr = JSONArray(jsonBody)
+                    for (i in 0 until arr.length()) {
+                        val c = arr.optJSONObject(i)?.optJSONObject("commit")?.optString("message").orEmpty().trim()
+                        if (c.isNotBlank()) recentCommitMessages.add(c)
+                    }
+                    if (commitMessage.isBlank() && arr.length() > 0) {
+                        val first = arr.optJSONObject(0)
+                        commitShaShort = first.optString("sha").take(7)
+                        val commitObj = first.optJSONObject("commit")
+                        commitMessage = commitObj?.optString("message").orEmpty().trim()
+                        commitAuthor = commitObj?.optJSONObject("author")?.optString("name").orEmpty().trim()
+                        commitDateIso = commitObj?.optJSONObject("author")?.optString("date").orEmpty().trim()
+                    }
+                }
+            }
+        }
+
+        val changelog = buildChangelogItems(
+            versionJsonChangelog = parsedMeta?.changelog.orEmpty(),
+            commitMessages = recentCommitMessages,
+            releaseBody = commitMessage
+        )
+
         return RemoteApkRelease(
             sourceLabel = "Ветка main",
             versionCode = remoteCode,
@@ -489,7 +737,12 @@ object BridgeAppUpdater {
             sizeBytes = foundSize,
             remoteSha = foundSha,
             isUpdateAvailable = evaluation.isUpdateAvailable,
-            isRebuildWithSameVersion = evaluation.matchedByArtifactDiff
+            isRebuildWithSameVersion = evaluation.matchedByArtifactDiff,
+            commitShaShort = commitShaShort,
+            commitDateIso = commitDateIso,
+            commitAuthor = commitAuthor,
+            commitMessage = commitMessage,
+            changelogItems = changelog
         )
     }
 
@@ -551,12 +804,13 @@ object BridgeAppUpdater {
         return targetFile
     }
 
-    private fun httpGetText(
+    private fun httpGetWithEtag(
         targetUrl: String,
         token: String,
         acceptJson: Boolean,
+        ifNoneMatch: String?,
         noCache: Boolean
-    ): String? {
+    ): BridgeHttpClient.ConditionalHttpResult {
         val headers = buildMap {
             put("User-Agent", "${BridgeHttpClient.GITHUB_USER_AGENT}/${BuildConfig.VERSION_NAME}")
             if (acceptJson) put("Accept", "application/vnd.github+json")
@@ -567,23 +821,43 @@ object BridgeAppUpdater {
             if (token.isNotBlank()) put("Authorization", "Bearer ${token.trim()}")
         }
         return runCatching {
-            val (code, text) = BridgeHttpClient.getTextWithCode(
+            BridgeHttpClient.getTextWithEtag(
                 url = targetUrl,
-                useCatalogClient = false,
+                ifNoneMatch = ifNoneMatch,
                 headers = headers,
-                maxRetries = 2
+                maxRetries = 1
             )
-            if (code in 200..299) text else null
-        }.getOrNull()
+        }.getOrElse {
+            BridgeHttpClient.ConditionalHttpResult(-1, null, ifNoneMatch, notModified = false)
+        }
     }
 
     internal data class ParsedRemoteVersion(
         val versionCode: Int?,
         val versionName: String,
-        val apkName: String?
+        val apkName: String?,
+        val changelog: List<String> = emptyList()
     )
 
     internal fun parseVersionJson(jsonText: String): ParsedRemoteVersion? {
+        runCatching {
+            val obj = JSONObject(jsonText)
+            val code = obj.optInt("versionCode", -1).takeIf { it > 0 }
+            val name = obj.optString("versionName").trim()
+            val apkName = obj.optString("apkName").trim().ifBlank { null }
+            val arr = obj.optJSONArray("changelog")
+            val changelogList = if (arr != null) {
+                (0 until arr.length()).mapNotNull { i ->
+                    arr.optString(i)?.trim()?.takeIf { it.isNotBlank() }
+                }
+            } else {
+                emptyList()
+            }
+            if (code != null || name.isNotBlank()) {
+                return ParsedRemoteVersion(code, name, apkName, changelogList)
+            }
+        }
+
         val code = Regex(""""versionCode"\s*:\s*(\d+)""").find(jsonText)
             ?.groupValues?.getOrNull(1)?.toIntOrNull()
             ?.takeIf { it > 0 }
@@ -591,8 +865,22 @@ object BridgeAppUpdater {
             ?.groupValues?.getOrNull(1)?.trim().orEmpty()
         val apkName = Regex(""""apkName"\s*:\s*"([^"]*)"""").find(jsonText)
             ?.groupValues?.getOrNull(1)?.trim()?.ifBlank { null }
+        val changelogRaw = Regex(""""changelog"\s*:\s*\[(.*?)]""", RegexOption.DOT_MATCHES_ALL)
+            .find(jsonText)?.groupValues?.getOrNull(1).orEmpty()
+        val changelogFallback = if (changelogRaw.isNotBlank()) {
+            Regex(""""((?:\\.|[^"\\])*)"""")
+                .findAll(changelogRaw)
+                .map { m -> m.groupValues[1].replace("\\\"", "\"").trim() }
+                .filter { it.isNotBlank() }
+                .toList()
+        } else emptyList()
         return if (code == null && name.isBlank()) null
-        else ParsedRemoteVersion(versionCode = code, versionName = name, apkName = apkName)
+        else ParsedRemoteVersion(
+            versionCode = code,
+            versionName = name,
+            apkName = apkName,
+            changelog = changelogFallback
+        )
     }
 
     internal fun parseGradleVersionInfo(gradleText: String): ParsedRemoteVersion? {
@@ -604,13 +892,55 @@ object BridgeAppUpdater {
         else ParsedRemoteVersion(versionCode = code, versionName = name, apkName = null)
     }
 
+    internal fun buildChangelogItems(
+        versionJsonChangelog: List<String>,
+        commitMessages: List<String>,
+        releaseBody: String
+    ): List<String> {
+        if (versionJsonChangelog.isNotEmpty()) {
+            return versionJsonChangelog.take(6)
+        }
+        val fromBody = releaseBody.lineSequence()
+            .map { it.trim().removePrefix("-").removePrefix("*").removePrefix("•").trim() }
+            .filter {
+                it.length >= 4 &&
+                    !it.startsWith("Merge ", ignoreCase = true) &&
+                    !it.startsWith("Signed-off-by", ignoreCase = true)
+            }
+            .distinct()
+            .take(5)
+            .toList()
+        if (fromBody.size >= 2) {
+            return fromBody
+        }
+        val fromCommits = commitMessages
+            .mapNotNull { it.lineSequence().firstOrNull()?.trim() }
+            .filter {
+                it.length >= 4 &&
+                    !it.startsWith("Merge ", ignoreCase = true) &&
+                    !it.equals("Update apk", ignoreCase = true)
+            }
+            .distinct()
+            .take(5)
+        return if (fromCommits.isNotEmpty()) fromCommits else fromBody
+    }
+
+    internal fun formatCommitDateLabel(isoDate: String): String {
+        if (isoDate.isBlank()) return ""
+        return runCatching {
+            val parser = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
+                timeZone = TimeZone.getTimeZone("UTC")
+            }
+            val parsed = parser.parse(isoDate.replace(Regex("""\.\d+Z$"""), "Z")) ?: return isoDate
+            val formatter = SimpleDateFormat("dd.MM.yyyy • HH:mm", Locale.getDefault())
+            formatter.format(parsed)
+        }.getOrElse { isoDate.take(16).replace('T', ' ') }
+    }
+
     internal fun normalizeVersionLabel(raw: String): String {
         return raw.trim().removePrefix("v").removePrefix("V").trim()
     }
 
-    /**
-     * Pure-JVM semver comparison: returns > 0 if remote > current, 0 if equal, < 0 if remote < current.
-     */
     internal fun compareSemver(remoteRaw: String, currentRaw: String): Int {
         val rParts = extractSemverSegments(remoteRaw)
         val cParts = extractSemverSegments(currentRaw)
@@ -688,7 +1018,6 @@ object BridgeAppUpdater {
             }
         }
 
-        // Same versionCode / versionName -> detect updated APK on main via exact byte size or git blob sha
         if (remoteSha.isNotBlank() &&
             remoteSha.equals(lastInstalledSha, ignoreCase = true) &&
             lastInstalledVersionCode == currentVersionCode
