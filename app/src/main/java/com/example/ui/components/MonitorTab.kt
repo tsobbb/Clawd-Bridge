@@ -429,9 +429,9 @@ private fun HeroLiveMonitorCard(
                         if (hasMedia) {
                             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                 listOf(
-                                    livingPalette.playerAccent,
-                                    livingPalette.playerAccentSecondary,
-                                    livingPalette.playerAccentTertiary
+                                    livingPalette.dot1,
+                                    livingPalette.dot2,
+                                    livingPalette.dot3
                                 ).forEach { dot ->
                                     Box(
                                         modifier = Modifier
@@ -516,8 +516,8 @@ private fun HeroLiveMonitorCard(
                                         .background(
                                             Brush.linearGradient(
                                                 listOf(
-                                                    livingPalette.blobPrimary.copy(alpha = 0.7f),
-                                                    livingPalette.blobSecondary.copy(alpha = 0.6f)
+                                                    livingPalette.cardTint,
+                                                    livingPalette.dot1.copy(alpha = 0.25f)
                                                 )
                                             )
                                         ),
@@ -786,14 +786,21 @@ private fun WavyPlaybackProgressBar(
         )
 
         if (splitX > 2f) {
+            val minWaveLenPx = 20.dp.toPx()
+            val endFadePx = 10.dp.toPx()
             val waveAmp = 2.6.dp.toPx() * amplitudeMultiplier
             val wavelengthPx = 26.dp.toPx()
             val stepPx = 3f
             val path = Path()
             var x = 0f
             while (x <= splitX) {
-                val edgeTaper = ((splitX - x) / 14f).coerceIn(0f, 1f) * (x / 10f).coerceIn(0f, 1f)
-                val y = cy + sin((x / wavelengthPx) * 2f * PI.toFloat() - wavePhase) * waveAmp * edgeTaper
+                val env = waveEnvelopeFactor(
+                    x = x,
+                    splitX = splitX,
+                    minWaveLenPx = minWaveLenPx,
+                    endFadePx = endFadePx
+                )
+                val y = cy + sin((x / wavelengthPx) * 2f * PI.toFloat() - wavePhase) * waveAmp * env
                 if (x == 0f) path.moveTo(x, y) else path.lineTo(x, y)
                 x += stepPx
             }
@@ -927,3 +934,26 @@ fun formatTimecode(ms: Long): String {
     val hundredths = (safeMs % 1000) / 10
     return String.format(Locale.US, "%02d:%02d.%02d", minutes, seconds, hundredths)
 }
+
+internal fun smoothstep(edge0: Float, edge1: Float, x: Float): Float {
+    val span = edge1 - edge0
+    if (kotlin.math.abs(span) < 1e-5f) {
+        return if (x >= edge1) 1f else 0f
+    }
+    val t = ((x - edge0) / span).coerceIn(0f, 1f)
+    return t * t * (3f - 2f * t)
+}
+
+internal fun waveEnvelopeFactor(
+    x: Float,
+    splitX: Float,
+    minWaveLenPx: Float,
+    endFadePx: Float
+): Float {
+    if (splitX <= 0f) return 0f
+    val overallFade = smoothstep(minWaveLenPx * 0.2f, minWaveLenPx, splitX)
+    val startTaper = smoothstep(0f, minWaveLenPx, x)
+    val endTaper = smoothstep(splitX, (splitX - endFadePx).coerceAtLeast(0f), x)
+    return overallFade * startTaper * endTaper
+}
+

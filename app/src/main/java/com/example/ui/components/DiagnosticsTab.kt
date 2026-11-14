@@ -95,6 +95,7 @@ import com.example.ui.theme.SecondaryGlass
 import com.example.ui.theme.SecondaryGlassText
 import com.example.ui.theme.SemanticCoral
 import com.example.ui.theme.SemanticEmerald
+import com.example.ui.theme.SheetScrim
 import com.example.ui.theme.SheetSurface
 import com.example.ui.theme.SpecularStroke
 import com.example.ui.theme.TextMuted
@@ -250,6 +251,7 @@ fun DiagnosticsTab(
             onDismissRequest = { apiTestResult = null },
             sheetState = sheetState,
             containerColor = SheetSurface,
+            scrimColor = SheetScrim,
             dragHandle = { BottomSheetDefaults.DragHandle(color = TextMuted.copy(alpha = 0.5f)) }
         ) {
             Column(

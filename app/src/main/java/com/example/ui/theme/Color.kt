@@ -3,10 +3,11 @@ package com.example.ui.theme
 import androidx.compose.ui.graphics.Color
 
 // Ambient Fluid Glass Canvas & Frosted Graphite Surfaces
-val BaseCanvas = Color(0xFF08090C)
+val BaseCanvas = Color(0xFF06080C)
 val CardSurfaceMonitor = Color(0xB812141A)     // rgba(18, 20, 26, 0.72)
 val CardSurfaceDense = Color(0xC712141A)       // rgba(18, 20, 26, 0.78)
-val SheetSurface = Color(0xF012141B)           // Deep frosted graphite for ModalBottomSheets
+val SheetSurface = Color(0xF713151B)           // Deep 97%-opaque frosted graphite for ModalBottomSheets
+val SheetScrim = Color(0xAD000000)             // 68% black scrim behind sheets
 val FloatingBarSurface = Color(0xD60F1116)     // rgba(15, 17, 22, 0.84)
 val NestedSurface = Color(0x0DFFFFFF)          // rgba(255, 255, 255, 0.05)
 val SpecularStroke = Color(0x14FFFFFF)         // rgba(255, 255, 255, 0.08)

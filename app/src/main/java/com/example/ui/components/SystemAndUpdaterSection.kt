@@ -195,7 +195,9 @@ fun BackupStorageCard(
                         .height(4.dp)
                         .clip(RoundedCornerShape(2.dp)),
                     color = if (fillFraction > 0.9f) SemanticAmber else MintCta,
-                    trackColor = NestedSurface
+                    trackColor = NestedSurface,
+                    gapSize = 0.dp,
+                    drawStopIndicator = {}
                 )
 
                 Row(
@@ -277,7 +279,7 @@ fun SystemAndServiceSection(
                     modifier = Modifier.testTag("notification_permission_button"),
                     trailing = {
                         if (isNotificationAccessGranted) {
-                            SemanticStatusPill(text = "Включен ✓", color = SemanticEmerald)
+                            SemanticStatusPill(text = "Включен", color = SemanticEmerald)
                         } else {
                             CompactMintPillButton(
                                 text = "Включить",
@@ -317,7 +319,7 @@ fun SystemAndServiceSection(
                     modifier = Modifier.testTag("battery_optimization_button"),
                     trailing = {
                         if (isBatteryOptIgnored) {
-                            SemanticStatusPill(text = "Отключена ✓", color = SemanticEmerald)
+                            SemanticStatusPill(text = "Отключена", color = SemanticEmerald)
                         } else {
                             CompactGraphitePillButton(
                                 text = "Настроить",
@@ -468,7 +470,7 @@ private fun BridgeUpdaterBlock(
                 }
                 is BridgeUpdateState.UpToDate -> {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        SemanticStatusPill(text = "Актуально ✓", color = SemanticEmerald)
+                        SemanticStatusPill(text = "Актуально", color = SemanticEmerald)
                         IconButton(
                             onClick = { BridgeAppUpdater.checkForUpdates(context) },
                             modifier = Modifier.minimumInteractiveComponentSize()
@@ -483,7 +485,7 @@ private fun BridgeUpdaterBlock(
                     }
                 }
                 is BridgeUpdateState.Installed -> {
-                    SemanticStatusPill(text = "Установлено ✓", color = SemanticEmerald)
+                    SemanticStatusPill(text = "Установлено", color = SemanticEmerald)
                 }
                 else -> Unit
             }
@@ -535,7 +537,9 @@ private fun BridgeUpdaterBlock(
                                 .height(5.dp)
                                 .clip(RoundedCornerShape(3.dp)),
                             color = MintCta,
-                            trackColor = NestedSurface
+                            trackColor = NestedSurface,
+                            gapSize = 0.dp,
+                            drawStopIndicator = {}
                         )
                         val mbDone = dl.downloadedBytes / (1024.0 * 1024.0)
                         val mbTotal = dl.totalBytes / (1024.0 * 1024.0)
@@ -559,7 +563,8 @@ private fun BridgeUpdaterBlock(
                                 .height(5.dp)
                                 .clip(RoundedCornerShape(3.dp)),
                             color = MintCta,
-                            trackColor = NestedSurface
+                            trackColor = NestedSurface,
+                            gapSize = 0.dp
                         )
                     }
                 }

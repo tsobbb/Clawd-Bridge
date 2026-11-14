@@ -185,6 +185,7 @@ fun ClawdBridgeMainApp() {
 
     val livingPalette = rememberLivingPaletteState(
         liveState = liveState,
+        artworkBitmap = artworkBitmap,
         dynamicBackgroundEnabled = dynamicBackgroundEnabled
     )
 

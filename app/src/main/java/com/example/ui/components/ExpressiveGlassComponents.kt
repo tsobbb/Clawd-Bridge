@@ -152,12 +152,15 @@ fun GraphiteGlassButton(
         interactionSource = interactionSource,
         shape = shapeOverride ?: morphShape,
         contentPadding = contentPadding,
-        border = BorderStroke(0.75.dp, SpecularStroke),
+        border = BorderStroke(
+            0.75.dp,
+            if (enabled) SpecularStroke else Color.White.copy(alpha = 0.04f)
+        ),
         colors = ButtonDefaults.buttonColors(
             containerColor = bgColor,
             contentColor = SecondaryGlassText,
-            disabledContainerColor = SecondaryGlass.copy(alpha = 0.45f),
-            disabledContentColor = SecondaryGlassText.copy(alpha = 0.45f)
+            disabledContainerColor = Color.White.copy(alpha = 0.03f),
+            disabledContentColor = Color.White.copy(alpha = 0.28f)
         ),
         elevation = ButtonDefaults.buttonElevation(0.dp, 0.dp, 0.dp),
         modifier = modifier.heightIn(min = 48.dp),

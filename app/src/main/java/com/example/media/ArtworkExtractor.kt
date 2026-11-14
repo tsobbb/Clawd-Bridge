@@ -475,10 +475,12 @@ object ArtworkExtractor {
 
         val thumbnail = createSquareThumbnail(rawBitmap, ARTWORK_SIZE_PX)
         val jpegBytes = compressToJpeg(thumbnail)
-        val paletteInts = extractAccentPalette(thumbnail)
-        val primaryInt = paletteInts.firstOrNull() ?: DEFAULT_ACCENT_INT
+        val pixels32 = ArtworkBlurHelper.extractPixels32(thumbnail)
+        val smart = SmartColorExtractor.extractFromPixels(pixels32, 32, 32)
+        val primaryInt = 0xFF000000.toInt() or smart.playerAccentRgb
+        val paletteInts = smart.paletteTriadRgb.map { 0xFF000000.toInt() or it }
         val paletteHex = paletteInts.map { toHexString(it) }
-        val primaryHex = paletteHex.firstOrNull() ?: toHexString(primaryInt)
+        val primaryHex = toHexString(primaryInt)
 
         return ExtractedArtwork(
             thumbnail = thumbnail,
@@ -560,153 +562,15 @@ object ArtworkExtractor {
     }
 
     internal fun extractVibrantAccentColor(bitmap: Bitmap): Int {
-        return extractAccentPalette(bitmap).firstOrNull() ?: DEFAULT_ACCENT_INT
+        val pixels = ArtworkBlurHelper.extractPixels32(bitmap)
+        return 0xFF000000.toInt() or SmartColorExtractor.extractFromPixels(pixels, 32, 32).playerAccentRgb
     }
 
     internal fun extractAccentPalette(bitmap: Bitmap): List<Int> {
-        val sw = ensureSoftwareArgb8888(bitmap)
-        val w = sw.width
-        val h = sw.height
-        if (w <= 0 || h <= 0) return DEFAULT_PALETTE_INTS
-
-        val stepX = (w / 20).coerceAtLeast(1)
-        val stepY = (h / 20).coerceAtLeast(1)
-
-        val binWeight = FloatArray(30)
-        val binRed = FloatArray(30)
-        val binGreen = FloatArray(30)
-        val binBlue = FloatArray(30)
-        val hsv = FloatArray(3)
-
-        var totalSampleWeight = 0f
-        var weightedSatSum = 0f
-        var avgR = 0f
-        var avgG = 0f
-        var avgB = 0f
-        var avgCount = 0
-
-        var y = 0
-        while (y < h) {
-            var x = 0
-            while (x < w) {
-                val pixel = sw.getPixel(x, y)
-                if (Color.alpha(pixel) >= 128) {
-                    val r = Color.red(pixel)
-                    val g = Color.green(pixel)
-                    val b = Color.blue(pixel)
-                    avgR += r
-                    avgG += g
-                    avgB += b
-                    avgCount++
-
-                    Color.colorToHSV(pixel, hsv)
-                    val sat = hsv[1]
-                    val value = hsv[2]
-                    if (value > 0.14f && !(sat < 0.10f && value > 0.90f)) {
-                        val weight = (sat * sat * 3.5f + 0.10f) * (0.35f + value * 0.65f)
-                        val bin = ((hsv[0] / 12f).toInt()).coerceIn(0, 29)
-                        binWeight[bin] += weight
-                        binRed[bin] += r * weight
-                        binGreen[bin] += g * weight
-                        binBlue[bin] += b * weight
-                        totalSampleWeight += weight
-                        weightedSatSum += sat * weight
-                    }
-                }
-                x += stepX
-            }
-            y += stepY
+        val pixels = ArtworkBlurHelper.extractPixels32(bitmap)
+        return SmartColorExtractor.extractFromPixels(pixels, 32, 32).paletteTriadRgb.map {
+            0xFF000000.toInt() or it
         }
-
-        if (sw !== bitmap && !sw.isRecycled) {
-            sw.recycle()
-        }
-
-        if (totalSampleWeight <= 0f || avgCount == 0) {
-            return DEFAULT_PALETTE_INTS
-        }
-
-        val meanSat = weightedSatSum / totalSampleWeight
-        val rankedBins = binWeight.indices
-            .filter { binWeight[it] > 0f }
-            .sortedByDescending { binWeight[it] }
-
-        if (rankedBins.isEmpty()) {
-            return DEFAULT_PALETTE_INTS
-        }
-
-        if (meanSat < 0.10f) {
-            val rMean = avgR / avgCount
-            val gMean = avgG / avgCount
-            val bMean = avgB / avgCount
-            val warmth = rMean - bMean
-            return when {
-                warmth > 4f -> listOf(0xFFD8B4A6.toInt(), 0xFFB88B8A.toInt(), 0xFF8C6B78.toInt())
-                warmth < -4f -> listOf(0xFF93C5FD.toInt(), 0xFF64748B.toInt(), 0xFF6366F1.toInt())
-                gMean > rMean + 3f -> listOf(0xFF94D2BD.toInt(), 0xFF6B9080.toInt(), 0xFF52796F.toInt())
-                else -> listOf(0xFFD6C7C7.toInt(), 0xFFA89098.toInt(), 0xFF7B6D8D.toInt())
-            }
-        }
-
-        fun normalizeBinColor(bin: Int): Int {
-            val wt = binWeight[bin]
-            val r = (binRed[bin] / wt).toInt().coerceIn(0, 255)
-            val g = (binGreen[bin] / wt).toInt().coerceIn(0, 255)
-            val b = (binBlue[bin] / wt).toInt().coerceIn(0, 255)
-            Color.RGBToHSV(r, g, b, hsv)
-            hsv[1] = hsv[1].coerceAtLeast(0.46f).coerceAtMost(0.92f)
-            hsv[2] = hsv[2].coerceIn(0.68f, 0.96f)
-            return Color.HSVToColor(hsv)
-        }
-
-        fun hueDistanceBins(a: Int, b: Int): Int {
-            val diff = abs(a - b)
-            return min(diff, 30 - diff)
-        }
-
-        val bin1 = rankedBins.first()
-        val weight1 = binWeight[bin1]
-        val color1 = normalizeBinColor(bin1)
-
-        val bin2 = rankedBins.firstOrNull { candidate ->
-            candidate != bin1 &&
-                hueDistanceBins(candidate, bin1) >= 2 &&
-                binWeight[candidate] >= weight1 * 0.16f
-        }
-        val color2 = if (bin2 != null) {
-            normalizeBinColor(bin2)
-        } else {
-            deriveAnalogousColor(color1, hueShift = 28f, satScale = 0.90f, valScale = 0.92f)
-        }
-
-        val bin3 = rankedBins.firstOrNull { candidate ->
-            candidate != bin1 &&
-                candidate != bin2 &&
-                hueDistanceBins(candidate, bin1) >= 2 &&
-                (bin2 == null || hueDistanceBins(candidate, bin2) >= 2) &&
-                binWeight[candidate] >= weight1 * 0.10f
-        }
-        val color3 = if (bin3 != null) {
-            normalizeBinColor(bin3)
-        } else {
-            deriveAnalogousColor(color1, hueShift = -28f, satScale = 0.85f, valScale = 0.78f)
-        }
-
-        return listOf(color1, color2, color3)
-    }
-
-    private fun deriveAnalogousColor(
-        baseColor: Int,
-        hueShift: Float,
-        satScale: Float,
-        valScale: Float
-    ): Int {
-        val hsv = FloatArray(3)
-        Color.colorToHSV(baseColor, hsv)
-        hsv[0] = ((hsv[0] + hueShift) % 360f + 360f) % 360f
-        hsv[1] = (hsv[1] * satScale).coerceIn(0.35f, 0.95f)
-        hsv[2] = (hsv[2] * valScale).coerceIn(0.55f, 0.96f)
-        return Color.HSVToColor(hsv)
     }
 
     fun toHexString(colorInt: Int): String {

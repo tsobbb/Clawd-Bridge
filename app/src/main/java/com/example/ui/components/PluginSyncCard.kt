@@ -87,6 +87,7 @@ import com.example.ui.theme.SecondaryGlass
 import com.example.ui.theme.SecondaryGlassText
 import com.example.ui.theme.SemanticCoral
 import com.example.ui.theme.SemanticEmerald
+import com.example.ui.theme.SheetScrim
 import com.example.ui.theme.SheetSurface
 import com.example.ui.theme.SpecularStroke
 import com.example.ui.theme.TextMuted
@@ -461,7 +462,9 @@ fun PluginSyncCard(
                                 .height(4.dp)
                                 .clip(RoundedCornerShape(2.dp)),
                             color = MintCta,
-                            trackColor = NestedSurface
+                            trackColor = NestedSurface,
+                            gapSize = 0.dp,
+                            drawStopIndicator = {}
                         )
                     } else {
                         LinearProgressIndicator(
@@ -470,7 +473,8 @@ fun PluginSyncCard(
                                 .height(4.dp)
                                 .clip(RoundedCornerShape(2.dp)),
                             color = MintCta,
-                            trackColor = NestedSurface
+                            trackColor = NestedSurface,
+                            gapSize = 0.dp
                         )
                     }
                 }
@@ -611,6 +615,7 @@ fun PluginSyncCard(
             onDismissRequest = { showSourceSettingsSheet = false },
             sheetState = sheetState,
             containerColor = SheetSurface,
+            scrimColor = SheetScrim,
             dragHandle = { BottomSheetDefaults.DragHandle(color = TextMuted.copy(alpha = 0.5f)) }
         ) {
             Column(
@@ -778,6 +783,7 @@ fun PluginSyncCard(
             onDismissRequest = { showFilePickerSheet = false },
             sheetState = sheetState,
             containerColor = SheetSurface,
+            scrimColor = SheetScrim,
             dragHandle = { BottomSheetDefaults.DragHandle(color = TextMuted.copy(alpha = 0.5f)) }
         ) {
             Column(
@@ -850,6 +856,7 @@ fun PluginSyncCard(
             onDismissRequest = { pendingShareFile = null },
             sheetState = sheetState,
             containerColor = SheetSurface,
+            scrimColor = SheetScrim,
             dragHandle = { BottomSheetDefaults.DragHandle(color = TextMuted.copy(alpha = 0.5f)) }
         ) {
             Column(

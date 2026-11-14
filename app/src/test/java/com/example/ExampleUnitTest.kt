@@ -282,4 +282,48 @@ class ExampleUnitTest {
         assertEquals(7, gradleParsed?.versionCode)
         assertEquals("2.5.1", gradleParsed?.versionName)
     }
+
+    @Test
+    fun `verify SmartColorExtractor preserves pure monochrome covers without inventing purple or olive`() {
+        val pixels = IntArray(32 * 32) { idx ->
+            when {
+                idx % 5 == 0 -> 0xFF0A0A0A.toInt()
+                idx % 3 == 0 -> 0xFF71717A.toInt()
+                else -> 0xFFF4F4F5.toInt()
+            }
+        }
+        val result = com.example.media.SmartColorExtractor.extractFromPixels(pixels, 32, 32)
+        assertTrue("B&W manga cover must be detected as monochrome", result.isMonochrome)
+        assertEquals(0xF4F4F5, result.playerAccentRgb)
+        assertEquals(listOf(0x52525B, 0xA1A1AA, 0xF4F4F5), result.paletteTriadRgb)
+
+        val grayAccent = com.example.ui.theme.ContrastGuard.normalizePlayerAccentRgb(0x808080)
+        val grayHsl = com.example.ui.theme.ContrastGuard.rgbToHsl(grayAccent)
+        assertTrue("ContrastGuard must keep monochrome gray saturation at 0", grayHsl.s < 0.01f)
+    }
+
+    @Test
+    fun `verify SmartColorExtractor keeps scarlet hue on black-and-red cover`() {
+        val pixels = IntArray(32 * 32) { idx ->
+            if (idx % 4 == 0) 0xFFDC2626.toInt() else 0xFF09090B.toInt()
+        }
+        val result = com.example.media.SmartColorExtractor.extractFromPixels(pixels, 32, 32)
+        assertFalse("Black+scarlet cover must not be classified monochrome", result.isMonochrome)
+
+        val accentHsl = com.example.media.SmartColorExtractor.rgbToHsl(result.playerAccentRgb)
+        assertTrue("PlayerAccent Hue must stay red (<=20 or >=340)", accentHsl.h <= 20f || accentHsl.h >= 340f)
+        assertTrue("PlayerAccent Lightness must be in 0.72..0.82", accentHsl.l in 0.71f..0.83f)
+        assertEquals(3, result.paletteTriadRgb.size)
+    }
+
+    @Test
+    fun `verify waveEnvelopeFactor prevents hook artifact on short progress segments`() {
+        val minWave = 60f
+        val endFade = 30f
+        assertEquals(0f, com.example.ui.components.waveEnvelopeFactor(2f, 5f, minWave, endFade), 1e-4f)
+        assertEquals(0f, com.example.ui.components.waveEnvelopeFactor(0f, 300f, minWave, endFade), 1e-4f)
+        assertEquals(0f, com.example.ui.components.waveEnvelopeFactor(300f, 300f, minWave, endFade), 1e-4f)
+        assertEquals(1f, com.example.ui.components.waveEnvelopeFactor(150f, 300f, minWave, endFade), 1e-4f)
+    }
 }
+
