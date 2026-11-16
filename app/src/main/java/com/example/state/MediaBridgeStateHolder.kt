@@ -7,6 +7,7 @@ import android.media.MediaMetadata
 import android.media.session.MediaController
 import android.media.session.PlaybackState
 import android.os.SystemClock
+import com.example.lyrics.LyricsCandidate
 import com.example.lyrics.LyricsCatalogResolver
 import com.example.lyrics.LyricsResult
 import com.example.media.ArtworkCatalogResolver
@@ -20,6 +21,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -152,8 +154,13 @@ object MediaBridgeStateHolder {
     val preferredLyricsProvider: StateFlow<String> = _preferredLyricsProvider.asStateFlow()
 
     private var lyricsJob: Job? = null
+    private var artworkCatalogJob: Job? = null
+    private var hdUpgradeJob: Job? = null
+
     @Volatile
     private var lastLyricsTrackKey: String = ""
+
+    private const val AUTO_SEARCH_DEBOUNCE_MS = 500L
 
     @Volatile
     private var currentArtworkBytes: ByteArray? = null
@@ -468,7 +475,8 @@ object MediaBridgeStateHolder {
 
     fun loadLyricsForCurrentTrack(
         forceRefresh: Boolean = false,
-        preferredProvider: String? = null
+        preferredProvider: String? = null,
+        isAutomatic: Boolean = false
     ) {
         val track = _playerUiState.value.takeIf { it.hasMedia }
             ?: _liveState.value.takeIf { it.hasMedia }
@@ -478,6 +486,10 @@ object MediaBridgeStateHolder {
             _preferredLyricsProvider.value = preferredProvider
         }
         val trackKey = "${track.artist}|${track.title}"
+        if (lastLyricsTrackKey.isNotEmpty() && lastLyricsTrackKey != trackKey) {
+            // Reset any previous track's manual variant override when track changes
+            LyricsCatalogResolver.clearAllManualOverrides()
+        }
         if (!forceRefresh && preferredProvider == null && lastLyricsTrackKey == trackKey) {
             val current = _lyricsUiState.value
             if (current is PlayerLyricsUiState.Loaded && current.trackKey == trackKey ||
@@ -490,10 +502,16 @@ object MediaBridgeStateHolder {
         lyricsJob?.cancel()
         lyricsJob = ioScope.launch {
             _lyricsUiState.value = PlayerLyricsUiState.Loading(trackKey)
+            if (isAutomatic && !forceRefresh && preferredProvider == null) {
+                delay(AUTO_SEARCH_DEBOUNCE_MS)
+            }
+            val latestTrack = _playerUiState.value.takeIf { it.hasMedia && "${it.artist}|${it.title}" == trackKey }
+                ?: track
             try {
                 val res = LyricsCatalogResolver.resolveLyrics(
-                    rawArtist = track.artist,
-                    rawTitle = track.title,
+                    rawArtist = latestTrack.artist,
+                    rawTitle = latestTrack.title,
+                    trackDurationMs = latestTrack.durationMs,
                     forceRefresh = forceRefresh,
                     preferredProvider = effectiveProvider.takeIf { it != "auto" }
                 )
@@ -505,6 +523,21 @@ object MediaBridgeStateHolder {
                 )
             }
         }
+    }
+
+    fun selectLyricsCandidate(candidate: LyricsCandidate) {
+        val track = _playerUiState.value.takeIf { it.hasMedia }
+            ?: _liveState.value.takeIf { it.hasMedia }
+            ?: return
+        val trackKey = "${track.artist}|${track.title}"
+        LyricsCatalogResolver.setManualOverride(track.artist, track.title, candidate)
+        val existingLoaded = _lyricsUiState.value as? PlayerLyricsUiState.Loaded
+        val siblingCandidates = existingLoaded?.result?.candidates?.takeIf { it.isNotEmpty() } ?: listOf(candidate)
+        val statuses = existingLoaded?.result?.providerStatuses ?: emptyMap()
+        _lyricsUiState.value = PlayerLyricsUiState.Loaded(
+            trackKey = trackKey,
+            result = candidate.toLyricsResult(siblingCandidates, statuses)
+        )
     }
 
     fun setServiceConnected(connected: Boolean) {
@@ -813,6 +846,8 @@ object MediaBridgeStateHolder {
 
         synchronized(artworkLock) {
             if (cachedTrackKey != trackKey) {
+                artworkCatalogJob?.cancel()
+                hdUpgradeJob?.cancel()
                 cachedTrackKey = trackKey
                 cachedArtworkSourceKey = ""
                 cachedExtractedArtwork = trackArtworkCache[trackKey]
@@ -943,7 +978,10 @@ object MediaBridgeStateHolder {
         hdUpgradeAttemptedKey = trackKey
         inFlightHdUpgradeKey = trackKey
         val preferSc = packageName.lowercase(Locale.US).contains("soundcloud")
-        ioScope.launch {
+        hdUpgradeJob?.cancel()
+        hdUpgradeJob = ioScope.launch {
+            delay(AUTO_SEARCH_DEBOUNCE_MS)
+            if (cachedTrackKey != trackKey) return@launch
             val hdRes = ArtworkCatalogResolver.resolveHdUpgrade(
                 rawArtist = artist,
                 rawTitle = title,
@@ -997,12 +1035,15 @@ object MediaBridgeStateHolder {
         metaSummary: String,
         notifDebug: String
     ) {
-        ioScope.launch {
+        artworkCatalogJob?.cancel()
+        artworkCatalogJob = ioScope.launch {
             val uriRes = ArtworkExtractor.loadFromUriDetailed(context, artUri)
             var finalArtwork = uriRes.artwork
             var finalNote = uriRes.debugNote
 
             if (finalArtwork == null && (artist.isNotBlank() || title.isNotBlank())) {
+                delay(AUTO_SEARCH_DEBOUNCE_MS)
+                if (cachedTrackKey != trackKey) return@launch
                 val preferSc = packageName.lowercase(Locale.US).contains("soundcloud")
                 val catalogRes = ArtworkCatalogResolver.resolveCoverWaterfall(
                     context = context,
@@ -1053,7 +1094,10 @@ object MediaBridgeStateHolder {
         metaSummary: String,
         notifSummary: String
     ) {
-        ioScope.launch {
+        artworkCatalogJob?.cancel()
+        artworkCatalogJob = ioScope.launch {
+            delay(AUTO_SEARCH_DEBOUNCE_MS)
+            if (cachedTrackKey != trackKey) return@launch
             val preferSc = packageName.lowercase(Locale.US).contains("soundcloud")
             val catalogRes = ArtworkCatalogResolver.resolveCoverWaterfall(
                 context = context,
@@ -1089,6 +1133,8 @@ object MediaBridgeStateHolder {
     private fun clearArtwork() {
         synchronized(artworkLock) {
             if (cachedTrackKey.isNotEmpty() || currentArtworkBytes != null || _artworkBitmap.value != null) {
+                artworkCatalogJob?.cancel()
+                hdUpgradeJob?.cancel()
                 cachedTrackKey = ""
                 cachedArtworkSourceKey = ""
                 cachedExtractedArtwork = null

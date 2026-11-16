@@ -158,8 +158,19 @@ object LocalHttpServer {
         val snap = MediaBridgeStateHolder.getCurrentSnapshot()
         val artist = params["artist"].orEmpty().ifBlank { snap.artist }
         val title = params["title"].orEmpty().ifBlank { snap.title }
+        val trackDurationMs = resolveEffectiveLyricsDurationMs(
+            rawDurationParam = params["duration"],
+            snapshot = snap,
+            retainedTrack = MediaBridgeStateHolder.playerUiState.value,
+            artist = artist,
+            title = title
+        )
 
-        val result = LyricsCatalogResolver.resolveLyrics(artist, title)
+        val result = LyricsCatalogResolver.resolveLyrics(
+            rawArtist = artist,
+            rawTitle = title,
+            trackDurationMs = trackDurationMs
+        )
         val bodyBytes = result.toJsonString().toByteArray(Charsets.UTF_8)
 
         val header = StringBuilder()
@@ -175,6 +186,39 @@ object LocalHttpServer {
         output.write(header.toString().toByteArray(Charsets.US_ASCII))
         output.write(bodyBytes)
         output.flush()
+    }
+
+    internal fun parseDurationParamMs(rawDuration: String?): Long {
+        val parsed = rawDuration?.trim()?.toLongOrNull() ?: return 0L
+        if (parsed <= 0L) return 0L
+        // Nuance 3: values > 3600 are milliseconds; <= 3600 are seconds
+        return if (parsed > 3600L) parsed else parsed * 1000L
+    }
+
+    private fun resolveEffectiveLyricsDurationMs(
+        rawDurationParam: String?,
+        snapshot: com.example.model.NowPlayingData,
+        retainedTrack: com.example.model.NowPlayingData,
+        artist: String,
+        title: String
+    ): Long {
+        val explicitMs = parseDurationParamMs(rawDurationParam)
+        if (explicitMs > 0L) return explicitMs
+        if (snapshot.hasMedia &&
+            snapshot.durationMs > 0L &&
+            snapshot.artist.equals(artist, ignoreCase = true) &&
+            snapshot.title.equals(title, ignoreCase = true)
+        ) {
+            return snapshot.durationMs
+        }
+        if (retainedTrack.hasMedia &&
+            retainedTrack.durationMs > 0L &&
+            retainedTrack.artist.equals(artist, ignoreCase = true) &&
+            retainedTrack.title.equals(title, ignoreCase = true)
+        ) {
+            return retainedTrack.durationMs
+        }
+        return 0L
     }
 
     internal fun parseQueryParams(query: String): Map<String, String> {

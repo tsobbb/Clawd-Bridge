@@ -806,7 +806,205 @@ class ExampleUnitTest {
         )
         assertEquals(42_700L, afterExpiry)
     }
+
+    @Test
+    fun `verify LyricsSearchEngine v2 parser strips junk extracts feats and builds L-R R-L SoundCloud splits`() {
+        val plan = com.example.lyrics.LyricsCatalogResolver.buildQueryPlan(
+            rawArtist = "крапива",
+            rawTitle = "i know - 6arelyhuman (prod. astral) [slowed + reverb] 🔥"
+        )
+        assertEquals("крапива", plan.cleanArtist)
+        assertTrue(plan.hypotheses.any { it.isSplitHypothesis && it.artist == "i know" && it.title == "6arelyhuman" })
+        assertTrue(plan.hypotheses.any { it.isSplitHypothesis && it.artist == "6arelyhuman" && it.title == "i know" })
+
+        // Nuance 1: H2(R-L) matches (6arelyhuman, i know) despite noisy rawArtist "крапива"
+        val matchEval = com.example.lyrics.LyricsCatalogResolver.evaluateCandidateMetadata(
+            plan = plan,
+            trackDurationSec = 142,
+            candidateArtist = "6arelyhuman",
+            candidateTitle = "i know",
+            candidateDurationSec = 143,
+            requireStrictNoDurationThresholds = false
+        )
+        assertTrue("Split hypothesis must ignore noisy rawArtist", matchEval != null && matchEval.accepted)
+
+        // Multi-artist split on "," / "&" / "feat"
+        val multiPlan = com.example.lyrics.LyricsCatalogResolver.buildQueryPlan(
+            rawArtist = "reuploader_sc",
+            rawTitle = "semmmyq, shinra - untitled (feat. asteria)"
+        )
+        assertTrue(multiPlan.featArtists.any { it.equals("asteria", ignoreCase = true) })
+        val multiEval = com.example.lyrics.LyricsCatalogResolver.evaluateCandidateMetadata(
+            plan = multiPlan,
+            trackDurationSec = 120,
+            candidateArtist = "semmmyq",
+            candidateTitle = "untitled",
+            candidateDurationSec = 121,
+            requireStrictNoDurationThresholds = false
+        )
+        assertTrue("Comma-split multi-artist must match", multiEval != null && multiEval.accepted)
+    }
+
+    @Test
+    fun `verify LyricsSearchEngine v2 symmetric Dice, 15s cutoff, anti-false-positive, and remix penalty`() {
+        // Nuance 2: "EDM" must NOT score 1.0 against "EDM Mega Party Mix 2025"
+        val dice = com.example.lyrics.LyricsCatalogResolver.computeSymmetricTokenSimilarity(
+            "EDM",
+            "EDM Mega Party Mix 2025"
+        )
+        assertTrue("Symmetric Dice similarity must reject bloated title (was $dice)", dice < 0.45f)
+
+        val asteriaPlan = com.example.lyrics.LyricsCatalogResolver.buildQueryPlan("asteria", "MONSTER")
+        // Unrelated artist "Skillet" for same title "Monster" must be REJECTED
+        val falsePositive = com.example.lyrics.LyricsCatalogResolver.evaluateCandidateMetadata(
+            plan = asteriaPlan,
+            trackDurationSec = 0,
+            candidateArtist = "Skillet",
+            candidateTitle = "Monster",
+            candidateDurationSec = 0,
+            requireStrictNoDurationThresholds = true
+        )
+        assertEquals(null, falsePositive)
+
+        // ±15s duration cutoff
+        val tooFar = com.example.lyrics.LyricsCatalogResolver.evaluateCandidateMetadata(
+            plan = asteriaPlan,
+            trackDurationSec = 150,
+            candidateArtist = "asteria",
+            candidateTitle = "MONSTER",
+            candidateDurationSec = 166,
+            requireStrictNoDurationThresholds = false
+        )
+        assertEquals("Duration diff 16s must be rejected", null, tooFar)
+
+        val originalEval = com.example.lyrics.LyricsCatalogResolver.evaluateCandidateMetadata(
+            plan = asteriaPlan,
+            trackDurationSec = 150,
+            candidateArtist = "asteria",
+            candidateTitle = "MONSTER",
+            candidateDurationSec = 152,
+            requireStrictNoDurationThresholds = false
+        )!!
+        val remixEval = com.example.lyrics.LyricsCatalogResolver.evaluateCandidateMetadata(
+            plan = asteriaPlan,
+            trackDurationSec = 150,
+            candidateArtist = "asteria",
+            candidateTitle = "MONSTER (Remix)",
+            candidateDurationSec = 152,
+            requireStrictNoDurationThresholds = false
+        )!!
+        assertTrue("Original score (${originalEval.score}) must exceed remix (${remixEval.score})", originalEval.score > remixEval.score + 30f)
+    }
+
+    @Test
+    fun `verify NetEase YRC verbatim parser, Chinese credit filter, KuGou base64, and syncMode ranking`() {
+        val sampleYrc = """
+            [0,1000](0,500,0)作词：Test Writer
+            [1000,1000](1000,500,0)作曲：Test Composer
+            [12000,2500](12000,600,0)Neon (12600,800,0)lights (13400,1100,0)glow
+            [15000,2000](15000,1000,0)Midnight (16000,1000,0)drive
+            [18000,2000](18000,1000,0)City (19000,1000,0)wide
+            [21000,2000](21000,1000,0)Feel (22000,1000,0)alive
+        """.trimIndent()
+        val rawYrcLines = com.example.lyrics.LyricsCatalogResolver.parseNetEaseYrc(sampleYrc)
+        assertEquals(6, rawYrcLines.size)
+        val filtered = com.example.lyrics.LyricsCatalogResolver.stripCreditMetaLinesIfBodyExists(rawYrcLines)
+        assertEquals(4, filtered.size)
+        assertEquals("Neon lights glow", filtered[0].text)
+        assertEquals(3, filtered[0].words.size)
+        assertEquals(12_600L, filtered[0].words[1].startMs)
+
+        // KuGou Base64 LRC decoding
+        val rawLrc = "[00:05.00]Line one\n[00:10.00]Line two\n[00:15.00]Line three"
+        val b64 = java.util.Base64.getEncoder().encodeToString(rawLrc.toByteArray(Charsets.UTF_8))
+        assertEquals(rawLrc, com.example.lyrics.LyricsCatalogResolver.decodeKuGouBase64Lrc(b64))
+
+        // Ranking priority: WORD_SYNCED > LINE_SYNCED > UNSYNCED
+        val plainCand = com.example.lyrics.LyricsCandidate(
+            id = "p", source = "genius", artist = "A", title = "B", durationSec = 0,
+            synced = false, syncedLyrics = "", plainLyrics = "text", lines = emptyList(),
+            score = 190f, titleSimilarity = 1f, artistSimilarity = 1f
+        )
+        val lineCand = com.example.lyrics.LyricsCandidate(
+            id = "l", source = "kugou", artist = "A", title = "B", durationSec = 150,
+            synced = true, syncedLyrics = rawLrc, plainLyrics = "text",
+            lines = com.example.lyrics.LyricsCatalogResolver.parseLrcLines(rawLrc),
+            score = 160f, titleSimilarity = 0.9f, artistSimilarity = 0.9f
+        )
+        val wordCand = com.example.lyrics.LyricsCandidate(
+            id = "w", source = "netease", artist = "A", title = "B", durationSec = 150,
+            synced = true, syncedLyrics = "", plainLyrics = "text", lines = filtered,
+            score = 150f, titleSimilarity = 0.9f, artistSimilarity = 0.9f
+        )
+        val ranked = com.example.lyrics.LyricsCatalogResolver.rankAndDeduplicateCandidates(listOf(plainCand, lineCand, wordCand))
+        assertEquals(listOf("w", "l", "p"), ranked.map { it.id })
+    }
+
+    @Test
+    fun `verify LocalHttpServer parses duration ms above 3600 and sec otherwise`() {
+        assertEquals(185_000L, LocalHttpServer.parseDurationParamMs("185"))
+        assertEquals(185_000L, LocalHttpServer.parseDurationParamMs("185000"))
+        assertEquals(3_600_000L, LocalHttpServer.parseDurationParamMs("3600"))
+        assertEquals(3_601L, LocalHttpServer.parseDurationParamMs("3601"))
+        assertEquals(0L, LocalHttpServer.parseDurationParamMs("invalid"))
+        assertEquals(0L, LocalHttpServer.parseDurationParamMs(null))
+    }
+
+    @Test
+    fun `verify NetworkLogStore 40-entry ring buffer and separate GitHub API vs Raw cooldown buckets`() {
+        com.example.network.NetworkLogStore.clear()
+        com.example.network.HostCooldownGuard.clearAll()
+
+        for (i in 1..45) {
+            com.example.network.NetworkLogStore.record(
+                category = com.example.network.NetworkCategory.LRCLIB,
+                method = "GET",
+                host = "lrclib.net",
+                pathAndQuery = "/api/search?q=$i",
+                httpCode = if (i % 10 == 0) 429 else 200,
+                errorType = null,
+                durationMs = 42L
+            )
+        }
+        assertEquals(40, com.example.network.NetworkLogStore.entries.value.size)
+        assertEquals("/api/search?q=45", com.example.network.NetworkLogStore.entries.value.first().pathAndQuery)
+        assertEquals(4, com.example.network.NetworkLogStore.errorCount.value)
+
+        // Separate buckets: exhausting github_api must NOT block github_raw
+        val now = 1_700_000_000_000L
+        com.example.network.HostCooldownGuard.recordHttpOutcome(
+            category = com.example.network.NetworkCategory.GITHUB_API,
+            httpCode = 403,
+            retryAfterHeader = null,
+            rateLimitRemainingHeader = "0",
+            rateLimitResetHeader = "1700001800",
+            nowMs = now
+        )
+        assertTrue(com.example.network.HostCooldownGuard.checkCooldown("github_api", now) != null)
+        assertEquals(null, com.example.network.HostCooldownGuard.checkCooldown("github_raw", now))
+
+        // Retry-After precedence
+        val retryUntil = com.example.network.HostCooldownGuard.computeCooldownUntilMs(
+            httpCode = 429,
+            retryAfterHeader = "90",
+            rateLimitRemainingHeader = null,
+            rateLimitResetHeader = null,
+            nowMs = now
+        )
+        assertEquals(now + 90_000L, retryUntil)
+
+        val msg = com.example.updater.BridgeAppUpdater.formatGitHubRateLimitMessage(
+            rateLimit = com.example.network.HostCooldownGuard.getLastGitHubRateLimit(),
+            cooldown = com.example.network.HostCooldownGuard.checkCooldown("github_api", now),
+            nowMs = now
+        )
+        assertTrue("Expected rate-limit message with token hint, got: $msg", msg != null && msg.contains("GitHub API") && msg.contains("Плагин"))
+
+        com.example.network.NetworkLogStore.clear()
+        com.example.network.HostCooldownGuard.clearAll()
+    }
 }
+
 
 
 

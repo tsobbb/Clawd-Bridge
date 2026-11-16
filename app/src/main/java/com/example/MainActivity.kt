@@ -225,7 +225,7 @@ fun ClawdBridgeMainApp(openUpdateSheetTrigger: Int = 0) {
 
     LaunchedEffect(isFullscreenPlayerOpen, playerUiState.artist, playerUiState.title) {
         if (isFullscreenPlayerOpen && playerUiState.hasMedia) {
-            MediaBridgeStateHolder.loadLyricsForCurrentTrack()
+            MediaBridgeStateHolder.loadLyricsForCurrentTrack(isAutomatic = true)
         }
     }
 
@@ -463,8 +463,12 @@ fun ClawdBridgeMainApp(openUpdateSheetTrigger: Int = 0) {
             onRefreshLyrics = { providerId ->
                 MediaBridgeStateHolder.loadLyricsForCurrentTrack(
                     forceRefresh = true,
-                    preferredProvider = providerId
+                    preferredProvider = providerId,
+                    isAutomatic = false
                 )
+            },
+            onSelectLyricsCandidate = { candidate ->
+                MediaBridgeStateHolder.selectLyricsCandidate(candidate)
             }
         )
     }

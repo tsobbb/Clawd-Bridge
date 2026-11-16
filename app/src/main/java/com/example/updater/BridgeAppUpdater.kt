@@ -19,6 +19,11 @@ import com.example.BuildConfig
 import com.example.MainActivity
 import com.example.R
 import com.example.network.BridgeHttpClient
+import com.example.network.CooldownInfo
+import com.example.network.GitHubRateLimitStatus
+import com.example.network.HostCooldownGuard
+import com.example.network.NetworkCategory
+import com.example.network.NetworkLogStore
 import com.example.plugin.PluginDownloader
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -162,7 +167,13 @@ object BridgeAppUpdater {
 
                 if (release == null) {
                     if (!isBackground) {
-                        _state.value = BridgeUpdateState.Error("APK не найден в релизах или ветке main")
+                        val rateMsg = formatGitHubRateLimitMessage(
+                            rateLimit = HostCooldownGuard.getLastGitHubRateLimit(),
+                            cooldown = HostCooldownGuard.checkCooldown(NetworkCategory.GITHUB_API.cooldownBucket)
+                        )
+                        _state.value = BridgeUpdateState.Error(
+                            rateMsg ?: "APK не найден в релизах или ветке main"
+                        )
                     }
                     return@launch
                 }
@@ -181,10 +192,37 @@ object BridgeAppUpdater {
             } catch (e: Exception) {
                 Log.e(TAG, "Update check failed (bg=$isBackground): ${e.message}", e)
                 if (!isBackground) {
-                    _state.value = BridgeUpdateState.Error(e.message ?: "Не удалось проверить обновления")
+                    val rateMsg = formatGitHubRateLimitMessage(
+                        rateLimit = HostCooldownGuard.getLastGitHubRateLimit(),
+                        cooldown = HostCooldownGuard.checkCooldown(NetworkCategory.GITHUB_API.cooldownBucket)
+                    )
+                    _state.value = BridgeUpdateState.Error(
+                        rateMsg ?: e.message ?: "Не удалось проверить обновления"
+                    )
                 }
             }
         }
+    }
+
+    internal fun formatGitHubRateLimitMessage(
+        rateLimit: GitHubRateLimitStatus?,
+        cooldown: CooldownInfo?,
+        nowMs: Long = System.currentTimeMillis()
+    ): String? {
+        val isRateLimited = (cooldown != null && cooldown.untilMs > nowMs) ||
+            (rateLimit != null && (rateLimit.httpCode == 403 || rateLimit.httpCode == 429) &&
+                (rateLimit.remaining == null || rateLimit.remaining == 0))
+        if (!isRateLimited) return null
+
+        val resetEpochSec = cooldown?.rateLimitResetEpochSec ?: rateLimit?.resetEpochSec
+        val resetMs = when {
+            resetEpochSec != null && resetEpochSec > 0L -> resetEpochSec * 1000L
+            cooldown != null -> cooldown.untilMs
+            rateLimit?.cooldownUntilMs != null -> rateLimit.cooldownUntilMs
+            else -> nowMs + HostCooldownGuard.DEFAULT_COOLDOWN_MS
+        }
+        val formattedTime = NetworkLogStore.formatTimestampHHmm(resetMs)
+        return "Лимит GitHub API (сброс в $formattedTime). Добавьте read-only Token во вкладке «Плагин»."
     }
 
     fun checkIfIntervalElapsed(context: Context) {

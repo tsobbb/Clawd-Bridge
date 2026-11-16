@@ -84,6 +84,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.BuildConfig
+import com.example.network.HostCooldownGuard
+import com.example.network.NetworkCategory
 import com.example.state.BackgroundStyle
 import com.example.ui.theme.CardSurfaceDense
 import com.example.ui.theme.HairlineDivider
@@ -759,6 +761,31 @@ private fun BridgeUpdaterBlock(
                 CompactGraphitePillButton(
                     text = "Повтор",
                     onClick = { BridgeAppUpdater.checkForUpdates(context) }
+                )
+            }
+        }
+
+        val apiCooldownMsg = remember(updateState) {
+            if (updateState is BridgeUpdateState.Error) {
+                null
+            } else {
+                BridgeAppUpdater.formatGitHubRateLimitMessage(
+                    rateLimit = HostCooldownGuard.getLastGitHubRateLimit(),
+                    cooldown = HostCooldownGuard.checkCooldown(NetworkCategory.GITHUB_API.cooldownBucket)
+                )
+            }
+        }
+        if (apiCooldownMsg != null) {
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = SemanticAmber.copy(alpha = 0.12f),
+                border = BorderStroke(0.5.dp, SemanticAmber.copy(alpha = 0.35f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = apiCooldownMsg,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                    style = MaterialTheme.typography.labelSmall.copy(color = SemanticAmber)
                 )
             }
         }

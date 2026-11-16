@@ -38,6 +38,8 @@ import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -140,9 +142,11 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.lyrics.LyricsCandidate
 import com.example.lyrics.LyricsCatalogResolver
 import com.example.lyrics.LyricsInterlude
 import com.example.lyrics.LyricsLine
+import com.example.lyrics.LyricsResult
 import com.example.lyrics.LyricsSyncMode
 import com.example.model.NowPlayingData
 import com.example.state.PlayerAccentSource
@@ -173,9 +177,10 @@ import java.util.Locale
 import kotlin.math.sin
 
 private val LYRICS_PROVIDERS = listOf(
-    "auto" to "Авто (LRCLIB → NetEase → Genius)",
+    "auto" to "Авто (LRCLIB · NetEase · KuGou)",
     "lrclib" to "LRCLIB (Синхронный)",
     "netease" to "NetEase Cloud Music",
+    "kugou" to "KuGou Music",
     "genius" to "Genius",
     "lyrics_ovh" to "Lyrics.ovh"
 )
@@ -329,7 +334,8 @@ fun FullscreenPlayerOverlay(
     onSeekByDelta: (Long) -> Unit,
     onSyncOffsetChange: (Int) -> Unit,
     onUpdateStyle: ((PlayerStyleConfig) -> PlayerStyleConfig) -> Unit,
-    onRefreshLyrics: (String?) -> Unit
+    onRefreshLyrics: (String?) -> Unit,
+    onSelectLyricsCandidate: (LyricsCandidate) -> Unit = {}
 ) {
     AnimatedVisibility(
         visible = isOpen,
@@ -363,7 +369,8 @@ fun FullscreenPlayerOverlay(
             onSeekByDelta = onSeekByDelta,
             onSyncOffsetChange = onSyncOffsetChange,
             onUpdateStyle = onUpdateStyle,
-            onRefreshLyrics = onRefreshLyrics
+            onRefreshLyrics = onRefreshLyrics,
+            onSelectLyricsCandidate = onSelectLyricsCandidate
         )
     }
 }
@@ -388,7 +395,8 @@ private fun FullscreenPlayerContent(
     onSeekByDelta: (Long) -> Unit,
     onSyncOffsetChange: (Int) -> Unit,
     onUpdateStyle: ((PlayerStyleConfig) -> PlayerStyleConfig) -> Unit,
-    onRefreshLyrics: (String?) -> Unit
+    onRefreshLyrics: (String?) -> Unit,
+    onSelectLyricsCandidate: (LyricsCandidate) -> Unit
 ) {
     val haptic = LocalHapticFeedback.current
     val density = LocalDensity.current
@@ -398,6 +406,7 @@ private fun FullscreenPlayerContent(
     var showOverflowSheet by remember { mutableStateOf(false) }
     var showStyleSheet by remember { mutableStateOf(false) }
     var showInfoSheet by remember { mutableStateOf(false) }
+    var showVariantsSheet by remember { mutableStateOf(false) }
     var showOffsetPopover by remember { mutableStateOf(false) }
     var showRemainingTime by remember { mutableStateOf(false) }
 
@@ -425,6 +434,7 @@ private fun FullscreenPlayerContent(
 
     BackHandler {
         when {
+            showVariantsSheet -> showVariantsSheet = false
             showOverflowSheet -> showOverflowSheet = false
             showStyleSheet -> showStyleSheet = false
             showInfoSheet -> showInfoSheet = false
@@ -711,16 +721,24 @@ private fun FullscreenPlayerContent(
         }
     }
 
+    val loadedLyricsResult = (lyricsState as? PlayerLyricsUiState.Loaded)?.result
+
     // Opaque Player Options & Lyrics Provider Sheet (eliminates transparent DropdownMenu text bleed-through)
     if (showOverflowSheet) {
         PlayerOverflowOptionsSheet(
             accentColor = effectiveAccent,
             preferredProvider = preferredLyricsProvider,
             isFocusMode = isFocusMode,
+            candidateCount = loadedLyricsResult?.candidates?.size ?: 0,
+            hasLoadedResult = loadedLyricsResult != null,
             onDismiss = { showOverflowSheet = false },
             onOpenStyleSheet = {
                 showOverflowSheet = false
                 showStyleSheet = true
+            },
+            onOpenVariantsSheet = {
+                showOverflowSheet = false
+                showVariantsSheet = true
             },
             onRefreshLyrics = {
                 showOverflowSheet = false
@@ -736,6 +754,20 @@ private fun FullscreenPlayerContent(
                 isLyricsMode = true
                 onRefreshLyrics(providerId)
             }
+        )
+    }
+
+    if (showVariantsSheet && loadedLyricsResult != null) {
+        LyricsVariantsBottomSheet(
+            result = loadedLyricsResult,
+            trackDurationMs = track.durationMs,
+            accentColor = effectiveAccent,
+            onSelectCandidate = { candidate ->
+                showVariantsSheet = false
+                isLyricsMode = true
+                onSelectLyricsCandidate(candidate)
+            },
+            onDismiss = { showVariantsSheet = false }
         )
     }
 
@@ -991,8 +1023,11 @@ private fun PlayerOverflowOptionsSheet(
     accentColor: Color,
     preferredProvider: String,
     isFocusMode: Boolean,
+    candidateCount: Int,
+    hasLoadedResult: Boolean,
     onDismiss: () -> Unit,
     onOpenStyleSheet: () -> Unit,
+    onOpenVariantsSheet: () -> Unit,
     onRefreshLyrics: () -> Unit,
     onToggleFocusMode: () -> Unit,
     onSelectProvider: (String) -> Unit
@@ -1033,6 +1068,21 @@ private fun PlayerOverflowOptionsSheet(
                         tint = accentColor,
                         onClick = onOpenStyleSheet
                     )
+                    if (hasLoadedResult) {
+                        HorizontalDivider(thickness = 0.5.dp, color = HairlineDivider)
+                        SheetOptionRow(
+                            icon = Icons.Default.Lyrics,
+                            title = "Варианты текста ($candidateCount)",
+                            subtitle = if (candidateCount > 0) {
+                                "Переключить версию (синхронизируется с /lyrics)"
+                            } else {
+                                "Статус источников по последнему поиску"
+                            },
+                            tint = if (candidateCount > 1) accentColor else TextSecondary,
+                            onClick = onOpenVariantsSheet,
+                            modifier = Modifier.testTag("lyrics_variants_option")
+                        )
+                    }
                     HorizontalDivider(thickness = 0.5.dp, color = HairlineDivider)
                     SheetOptionRow(
                         icon = Icons.Default.Refresh,
@@ -1101,16 +1151,206 @@ private fun PlayerOverflowOptionsSheet(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@Composable
+private fun LyricsVariantsBottomSheet(
+    result: LyricsResult,
+    trackDurationMs: Long,
+    accentColor: Color,
+    onSelectCandidate: (LyricsCandidate) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val trackDurationSec = if (trackDurationMs > 0L) (trackDurationMs / 1000L).toInt() else 0
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = Color(0xF713161D),
+        scrimColor = Color.Black.copy(alpha = 0.38f),
+        dragHandle = { BottomSheetDefaults.DragHandle(color = TextMuted.copy(alpha = 0.5f)) }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                text = "Варианты текста (${result.candidates.size})",
+                style = MaterialTheme.typography.titleLarge.copy(color = TextPrimary)
+            )
+            Text(
+                text = "Выбранный вариант также отдаётся плагину через /lyrics до смены трека.",
+                style = MaterialTheme.typography.bodySmall.copy(color = TextMuted)
+            )
+
+            if (result.candidates.isEmpty()) {
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = Color(0xFF1C2029),
+                    border = BorderStroke(0.5.dp, SpecularStroke),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "Подходящих вариантов не найдено.",
+                        modifier = Modifier.padding(14.dp),
+                        style = MaterialTheme.typography.bodySmall.copy(color = TextSecondary)
+                    )
+                }
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    result.candidates.forEach { cand ->
+                        val isSelected = cand.id == result.selectedCandidateId
+                        val syncBadge = when (cand.syncMode) {
+                            LyricsSyncMode.WORD_SYNCED -> "Пословный"
+                            LyricsSyncMode.LINE_SYNCED -> "LRC"
+                            LyricsSyncMode.UNSYNCED -> "Текст"
+                        }
+                        val durLabel = buildString {
+                            if (cand.durationSec > 0) {
+                                append(formatPlayerClock(cand.durationSec * 1000L))
+                                if (trackDurationSec > 0) {
+                                    val delta = cand.durationSec - trackDurationSec
+                                    val sign = if (delta >= 0) "+" else ""
+                                    append(" (Δ $sign${delta}с)")
+                                }
+                            } else {
+                                append("без длит.")
+                            }
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = if (isSelected) accentColor.copy(alpha = 0.14f) else Color(0xFF1C2029),
+                            border = BorderStroke(
+                                0.75.dp,
+                                if (isSelected) accentColor.copy(alpha = 0.50f) else SpecularStroke
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(16.dp))
+                                .clickable { onSelectCandidate(cand) }
+                                .testTag("lyrics_variant_${cand.source}")
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Column(
+                                    modifier = Modifier.weight(1f),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Row(
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Surface(
+                                            shape = RoundedCornerShape(6.dp),
+                                            color = NestedSurface
+                                        ) {
+                                            Text(
+                                                text = cand.source.uppercase(Locale.US),
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                                style = MaterialTheme.typography.labelSmall.copy(
+                                                    fontFamily = JetBrainsMonoFontFamily,
+                                                    color = accentColor,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                            )
+                                        }
+                                        Surface(
+                                            shape = RoundedCornerShape(6.dp),
+                                            color = NestedSurface
+                                        ) {
+                                            Text(
+                                                text = syncBadge,
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                                style = MaterialTheme.typography.labelSmall.copy(
+                                                    color = TextSecondary
+                                                )
+                                            )
+                                        }
+                                        Text(
+                                            text = durLabel,
+                                            style = MaterialTheme.typography.labelSmall.withTabularNumbers().copy(
+                                                fontFamily = JetBrainsMonoFontFamily,
+                                                color = TextMuted
+                                            )
+                                        )
+                                    }
+                                    Text(
+                                        text = "${cand.title} — ${cand.artist}",
+                                        style = MaterialTheme.typography.bodyMedium.copy(
+                                            color = TextPrimary,
+                                            fontWeight = FontWeight.Medium
+                                        ),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                if (isSelected) {
+                                    Icon(
+                                        imageVector = Icons.Default.Check,
+                                        contentDescription = "Активный вариант",
+                                        tint = accentColor,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (result.providerStatuses.isNotEmpty()) {
+                HorizontalDivider(thickness = 0.5.dp, color = HairlineDivider)
+                Text(
+                    text = "Ответы источников",
+                    style = MaterialTheme.typography.labelMedium.copy(color = TextMuted)
+                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    result.providerStatuses.forEach { (provider, status) ->
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = Color(0xFF1C2029),
+                            border = BorderStroke(0.5.dp, SpecularStroke)
+                        ) {
+                            Text(
+                                text = "$provider: $status",
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                style = MaterialTheme.typography.labelSmall.withTabularNumbers().copy(
+                                    fontFamily = JetBrainsMonoFontFamily,
+                                    color = TextSecondary
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun SheetOptionRow(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     title: String,
     subtitle: String,
     tint: Color,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 13.dp),
@@ -1423,6 +1663,42 @@ private fun PlayerLyricsStage(
                             style = MaterialTheme.typography.bodySmall.copy(color = TextMuted),
                             textAlign = TextAlign.Center
                         )
+                        if (res.providerStatuses.isNotEmpty()) {
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = NestedSurface,
+                                border = BorderStroke(0.5.dp, SpecularStroke),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    res.providerStatuses.forEach { (provider, status) ->
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Text(
+                                                text = provider,
+                                                style = MaterialTheme.typography.labelSmall.copy(color = TextMuted)
+                                            )
+                                            Text(
+                                                text = status,
+                                                style = MaterialTheme.typography.labelSmall.withTabularNumbers().copy(
+                                                    fontFamily = JetBrainsMonoFontFamily,
+                                                    color = if (status.contains("403") || status.contains("429") || status.contains("Cooldown") || status.contains("Exception")) {
+                                                        SemanticCoral
+                                                    } else {
+                                                        TextSecondary
+                                                    }
+                                                )
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             GraphiteGlassButton(onClick = onRefreshLyrics) {
                                 Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))

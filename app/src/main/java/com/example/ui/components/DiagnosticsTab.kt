@@ -38,6 +38,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.FilterAlt
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Http
 import androidx.compose.material.icons.filled.Lyrics
 import androidx.compose.material.icons.filled.Refresh
@@ -82,8 +83,12 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.layout.heightIn
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.filter.AppFilterManager
 import com.example.filter.DiscoveredMediaApp
+import com.example.network.NetworkLogEntry
+import com.example.network.NetworkLogStore
 import com.example.state.BackgroundStyle
 import com.example.ui.theme.CardSurfaceDense
 import com.example.ui.theme.HairlineDivider
@@ -171,6 +176,9 @@ fun DiagnosticsTab(
     val haptic = LocalHapticFeedback.current
     var apiTestResult by remember { mutableStateOf<TestApiResult?>(null) }
     var isTestingApi by remember { mutableStateOf(false) }
+    var showNetworkLogSheet by remember { mutableStateOf(false) }
+    val networkEntries by NetworkLogStore.entries.collectAsStateWithLifecycle()
+    val networkErrorCount by NetworkLogStore.errorCount.collectAsStateWithLifecycle()
 
     Column(
         modifier = modifier.fillMaxWidth(),
@@ -183,6 +191,9 @@ fun DiagnosticsTab(
             requestCount = requestCount,
             activeSseClients = activeSseClients,
             artworkDebugStatus = artworkDebugStatus,
+            networkLogCount = networkEntries.size,
+            networkErrorCount = networkErrorCount,
+            onOpenNetworkLog = { showNetworkLogSheet = true },
             onCopyUrl = { urlToCopy ->
                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 clipboard.setPrimaryClip(ClipData.newPlainText("Clawd Bridge API", urlToCopy))
@@ -333,6 +344,229 @@ fun DiagnosticsTab(
             }
         }
     }
+    if (showNetworkLogSheet) {
+        NetworkLogBottomSheet(
+            entries = networkEntries,
+            errorCount = networkErrorCount,
+            onClear = { NetworkLogStore.clear() },
+            onDismiss = { showNetworkLogSheet = false }
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun NetworkLogBottomSheet(
+    entries: List<NetworkLogEntry>,
+    errorCount: Int,
+    onClear: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var onlyErrors by remember { mutableStateOf(false) }
+    val filteredEntries = remember(entries, onlyErrors) {
+        if (onlyErrors) entries.filter { it.isError } else entries
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = SheetSurface,
+        scrimColor = SheetScrim,
+        dragHandle = { BottomSheetDefaults.DragHandle(color = TextMuted.copy(alpha = 0.5f)) }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text(
+                        text = "Журнал сети (${entries.size}/${NetworkLogStore.MAX_ENTRIES})",
+                        style = MaterialTheme.typography.titleLarge.withTabularNumbers().copy(color = TextPrimary)
+                    )
+                    Text(
+                        text = "Ошибок / лимитов: $errorCount",
+                        style = MaterialTheme.typography.labelMedium.withTabularNumbers().copy(
+                            color = if (errorCount > 0) SemanticCoral else TextMuted
+                        )
+                    )
+                }
+
+                TextButton(
+                    onClick = onClear,
+                    enabled = entries.isNotEmpty(),
+                    modifier = Modifier.testTag("network_log_clear_button")
+                ) {
+                    Text(
+                        text = "Очистить",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (entries.isNotEmpty()) SemanticCoral else TextMuted
+                    )
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                FilterChip(
+                    selected = onlyErrors,
+                    onClick = { onlyErrors = !onlyErrors },
+                    label = {
+                        Text(
+                            text = "Только ошибки ($errorCount)",
+                            style = MaterialTheme.typography.labelMedium.withTabularNumbers()
+                        )
+                    },
+                    shape = RoundedCornerShape(999.dp),
+                    colors = FilterChipDefaults.filterChipColors(
+                        containerColor = NestedSurface,
+                        labelColor = TextSecondary,
+                        selectedContainerColor = SemanticCoral.copy(alpha = 0.18f),
+                        selectedLabelColor = SemanticCoral
+                    ),
+                    border = FilterChipDefaults.filterChipBorder(
+                        enabled = true,
+                        selected = onlyErrors,
+                        borderColor = SpecularStroke,
+                        selectedBorderColor = SemanticCoral.copy(alpha = 0.40f)
+                    ),
+                    modifier = Modifier.testTag("network_log_errors_filter")
+                )
+            }
+
+            if (filteredEntries.isEmpty()) {
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = NestedSurface,
+                    border = BorderStroke(0.5.dp, SpecularStroke),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = if (onlyErrors) "Сетевых ошибок не зафиксировано." else "Журнал исходящих HTTP-запросов пока пуст.",
+                        modifier = Modifier.padding(16.dp),
+                        style = MaterialTheme.typography.bodySmall.copy(color = TextMuted)
+                    )
+                }
+            } else {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 420.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    filteredEntries.forEach { entry ->
+                        val statusText = when {
+                            entry.isCooldownBlocked -> "COOLDOWN"
+                            entry.errorType != null -> entry.errorType
+                            entry.httpCode != null -> "HTTP ${entry.httpCode}"
+                            else -> "—"
+                        }
+                        val statusColor = when {
+                            entry.isCooldownBlocked || entry.errorType != null -> SemanticCoral
+                            entry.httpCode != null && (entry.httpCode == 403 || entry.httpCode == 429 || entry.httpCode >= 500) -> SemanticCoral
+                            entry.httpCode != null && entry.httpCode in 200..399 -> SemanticEmerald
+                            else -> TextSecondary
+                        }
+
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = NestedSurface,
+                            border = BorderStroke(0.5.dp, SpecularStroke),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Surface(
+                                            shape = RoundedCornerShape(6.dp),
+                                            color = SecondaryGlass
+                                        ) {
+                                            Text(
+                                                text = entry.category.label,
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                                style = MaterialTheme.typography.labelSmall.copy(
+                                                    color = MintCta,
+                                                    fontWeight = FontWeight.SemiBold
+                                                )
+                                            )
+                                        }
+                                        Text(
+                                            text = NetworkLogStore.formatTimestampHHmmss(entry.timestampMs),
+                                            style = MaterialTheme.typography.labelSmall.withTabularNumbers().copy(
+                                                fontFamily = JetBrainsMonoFontFamily,
+                                                color = TextMuted
+                                            )
+                                        )
+                                        Text(
+                                            text = "${entry.durationMs} мс",
+                                            style = MaterialTheme.typography.labelSmall.withTabularNumbers().copy(
+                                                fontFamily = JetBrainsMonoFontFamily,
+                                                color = TextMuted
+                                            )
+                                        )
+                                    }
+
+                                    Text(
+                                        text = statusText,
+                                        style = MaterialTheme.typography.labelSmall.withTabularNumbers().copy(
+                                            fontFamily = JetBrainsMonoFontFamily,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = statusColor
+                                        )
+                                    )
+                                }
+
+                                Text(
+                                    text = "${entry.method} ${entry.host}${entry.pathAndQuery}",
+                                    style = MaterialTheme.typography.bodySmall.copy(
+                                        fontFamily = JetBrainsMonoFontFamily,
+                                        color = TextSecondary
+                                    ),
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+
+                                if (entry.rateLimitRemaining != null) {
+                                    val resetSuffix = entry.rateLimitResetEpochSec?.let { epoch ->
+                                        " • сброс ${NetworkLogStore.formatTimestampHHmm(epoch * 1000L)}"
+                                    } ?: ""
+                                    Text(
+                                        text = "X-RateLimit-Remaining: ${entry.rateLimitRemaining}$resetSuffix",
+                                        style = MaterialTheme.typography.labelSmall.withTabularNumbers().copy(
+                                            fontFamily = JetBrainsMonoFontFamily,
+                                            color = if (entry.rateLimitRemaining <= 5) SemanticCoral else TextMuted
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -343,6 +577,9 @@ private fun HttpServerDiagnosticsCard(
     requestCount: Long,
     activeSseClients: Int,
     artworkDebugStatus: String,
+    networkLogCount: Int,
+    networkErrorCount: Int,
+    onOpenNetworkLog: () -> Unit,
     onCopyUrl: (String) -> Unit,
     onTestNowPlaying: () -> Unit,
     onTestSse: () -> Unit,
@@ -619,6 +856,80 @@ private fun HttpServerDiagnosticsCard(
                     text = "Тест GET /lyrics",
                     style = MaterialTheme.typography.labelLarge
                 )
+            }
+
+            // Compact Network Log row with error count badge
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = NestedSurface,
+                border = BorderStroke(0.5.dp, SpecularStroke),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .clickable(onClick = onOpenNetworkLog)
+                    .testTag("open_network_log_button")
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.History,
+                            contentDescription = null,
+                            tint = if (networkErrorCount > 0) SemanticCoral else MintCta,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Text(
+                            text = "Журнал сети",
+                            style = MaterialTheme.typography.bodyMedium.copy(
+                                color = TextPrimary,
+                                fontWeight = FontWeight.Medium
+                            )
+                        )
+                    }
+
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (networkErrorCount > 0) {
+                            Surface(
+                                shape = RoundedCornerShape(999.dp),
+                                color = SemanticCoral.copy(alpha = 0.18f)
+                            ) {
+                                Text(
+                                    text = "$networkErrorCount ош.",
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                    style = MaterialTheme.typography.labelSmall.withTabularNumbers().copy(
+                                        fontFamily = JetBrainsMonoFontFamily,
+                                        color = SemanticCoral,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                )
+                            }
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(999.dp),
+                            color = SecondaryGlass
+                        ) {
+                            Text(
+                                text = "$networkLogCount запр.",
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                style = MaterialTheme.typography.labelSmall.withTabularNumbers().copy(
+                                    fontFamily = JetBrainsMonoFontFamily,
+                                    color = TextSecondary
+                                )
+                            )
+                        }
+                    }
+                }
             }
         }
     }

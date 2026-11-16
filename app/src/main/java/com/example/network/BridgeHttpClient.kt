@@ -3,6 +3,7 @@ package com.example.network
 import android.util.Log
 import okhttp3.ConnectionPool
 import okhttp3.Dns
+import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -32,6 +33,87 @@ object Ipv4FirstDns : Dns {
     }
 }
 
+private object NetworkDiagnosticsInterceptor : Interceptor {
+    override fun intercept(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        val url = request.url
+        val host = url.host
+        val pathWithQuery = buildString {
+            append(url.encodedPath)
+            url.encodedQuery?.let { q ->
+                append('?').append(q)
+            }
+        }
+        val category = HostCooldownGuard.resolveCategory(host)
+        val nowMs = System.currentTimeMillis()
+        val activeCooldown = HostCooldownGuard.checkCooldown(category.cooldownBucket, nowMs)
+        if (activeCooldown != null) {
+            NetworkLogStore.record(
+                category = category,
+                method = request.method,
+                host = host,
+                pathAndQuery = pathWithQuery,
+                httpCode = activeCooldown.reasonCode,
+                errorType = "Cooldown до ${NetworkLogStore.formatTimestampHHmm(activeCooldown.untilMs)}",
+                durationMs = 0L,
+                rateLimitRemaining = activeCooldown.rateLimitRemaining,
+                rateLimitResetEpochSec = activeCooldown.rateLimitResetEpochSec,
+                isCooldownBlocked = true,
+                timestampMs = nowMs
+            )
+            throw HostCooldownException(
+                bucket = category.cooldownBucket,
+                cooldownUntilMs = activeCooldown.untilMs,
+                httpCode = activeCooldown.reasonCode
+            )
+        }
+
+        val startedNs = System.nanoTime()
+        return try {
+            val response = chain.proceed(request)
+            val elapsedMs = (System.nanoTime() - startedNs) / 1_000_000L
+            val remainingRaw = response.header("X-RateLimit-Remaining")
+            val resetRaw = response.header("X-RateLimit-Reset")
+            val retryAfterRaw = response.header("Retry-After")
+            HostCooldownGuard.recordHttpOutcome(
+                category = category,
+                httpCode = response.code,
+                retryAfterHeader = retryAfterRaw,
+                rateLimitRemainingHeader = remainingRaw,
+                rateLimitResetHeader = resetRaw
+            )
+            NetworkLogStore.record(
+                category = category,
+                method = request.method,
+                host = host,
+                pathAndQuery = pathWithQuery,
+                httpCode = response.code,
+                errorType = null,
+                durationMs = elapsedMs,
+                rateLimitRemaining = remainingRaw?.trim()?.toIntOrNull(),
+                rateLimitResetEpochSec = resetRaw?.trim()?.toLongOrNull(),
+                isCooldownBlocked = false
+            )
+            response
+        } catch (t: Throwable) {
+            val elapsedMs = (System.nanoTime() - startedNs) / 1_000_000L
+            if (t !is HostCooldownException) {
+                NetworkLogStore.record(
+                    category = category,
+                    method = request.method,
+                    host = host,
+                    pathAndQuery = pathWithQuery,
+                    httpCode = null,
+                    errorType = t.javaClass.simpleName,
+                    durationMs = elapsedMs,
+                    isCooldownBlocked = false
+                )
+            }
+            throw t
+        }
+    }
+}
+
 /**
  * Shared OkHttp networking layer with shared ConnectionPool & IPv4-first DNS:
  * - githubClient: resilient 20s/45s/60s timeouts for GitHub APIs, raw files & APK/plugin streams
@@ -50,6 +132,7 @@ object BridgeHttpClient {
         OkHttpClient.Builder()
             .connectionPool(sharedConnectionPool)
             .dns(Ipv4FirstDns)
+            .addInterceptor(NetworkDiagnosticsInterceptor)
             .connectTimeout(20, TimeUnit.SECONDS)
             .readTimeout(45, TimeUnit.SECONDS)
             .writeTimeout(20, TimeUnit.SECONDS)
@@ -67,6 +150,87 @@ object BridgeHttpClient {
             .writeTimeout(10, TimeUnit.SECONDS)
             .callTimeout(15, TimeUnit.SECONDS)
             .build()
+    }
+
+    data class DetailedTextResult(
+        val httpCode: Int,
+        val body: String?,
+        val errorLabel: String? = null,
+        val isCooldown: Boolean = false
+    )
+
+    fun getTextDetailed(
+        url: String,
+        useCatalogClient: Boolean = true,
+        headers: Map<String, String> = emptyMap(),
+        maxRetries: Int = 1,
+        customCallTimeoutMs: Long? = null
+    ): DetailedTextResult {
+        val baseClient = if (useCatalogClient) catalogClient else githubClient
+        val client = if (customCallTimeoutMs != null && customCallTimeoutMs > 0L) {
+            baseClient.newBuilder()
+                .callTimeout(customCallTimeoutMs, TimeUnit.MILLISECONDS)
+                .build()
+        } else {
+            baseClient
+        }
+        val attempts = maxRetries.coerceAtLeast(0) + 1
+        var lastErrorLabel: String? = null
+        for (attempt in 0 until attempts) {
+            try {
+                val reqBuilder = Request.Builder().url(url).get()
+                headers.forEach { (k, v) -> reqBuilder.header(k, v) }
+                client.newCall(reqBuilder.build()).execute().use { response ->
+                    val code = response.code
+                    if (response.isSuccessful) {
+                        return DetailedTextResult(httpCode = code, body = response.body?.string())
+                    }
+                    if (code == 403 || code == 429) {
+                        val serverHeader = response.header("Server").orEmpty()
+                        val cfRay = response.header("CF-RAY")
+                        val label = when {
+                            code == 403 && (serverHeader.contains("cloudflare", ignoreCase = true) || cfRay != null) ->
+                                "HTTP 403 Cloudflare"
+                            code == 429 -> "HTTP 429"
+                            else -> "HTTP $code"
+                        }
+                        return DetailedTextResult(httpCode = code, body = null, errorLabel = label)
+                    }
+                    if (code in 500..599 && attempt < attempts - 1) {
+                        lastErrorLabel = "HTTP $code"
+                        Thread.sleep(600L)
+                    } else {
+                        return DetailedTextResult(
+                            httpCode = code,
+                            body = null,
+                            errorLabel = if (code == 404) null else "HTTP $code"
+                        )
+                    }
+                }
+            } catch (e: HostCooldownException) {
+                return DetailedTextResult(
+                    httpCode = e.httpCode,
+                    body = null,
+                    errorLabel = "Пауза HTTP ${e.httpCode} до ${NetworkLogStore.formatTimestampHHmm(e.cooldownUntilMs)}",
+                    isCooldown = true
+                )
+            } catch (e: SocketTimeoutException) {
+                lastErrorLabel = "Timeout"
+                if (attempt < attempts - 1) runCatching { Thread.sleep(600L) }
+            } catch (e: InterruptedIOException) {
+                lastErrorLabel = "Timeout"
+                if (Thread.currentThread().isInterrupted) break
+                if (attempt < attempts - 1) runCatching { Thread.sleep(600L) }
+            } catch (e: IOException) {
+                lastErrorLabel = e.javaClass.simpleName
+                if (Thread.currentThread().isInterrupted) break
+                if (attempt < attempts - 1) runCatching { Thread.sleep(600L) }
+            } catch (t: Throwable) {
+                lastErrorLabel = t.javaClass.simpleName
+                break
+            }
+        }
+        return DetailedTextResult(httpCode = -1, body = null, errorLabel = lastErrorLabel ?: "Error")
     }
 
     fun getBytes(
@@ -107,6 +271,8 @@ object BridgeHttpClient {
                     }
                     return Pair(out.toByteArray(), "http:$code")
                 }
+            } catch (e: HostCooldownException) {
+                return Pair(null, "cooldown:${e.httpCode}")
             } catch (e: InterruptedIOException) {
                 lastNote = "http:${e.javaClass.simpleName}"
                 if (Thread.currentThread().isInterrupted) break
@@ -150,6 +316,8 @@ object BridgeHttpClient {
                         return Pair(code, null)
                     }
                 }
+            } catch (e: HostCooldownException) {
+                throw e
             } catch (e: SocketTimeoutException) {
                 lastError = e
                 Log.w(TAG, "Timeout on attempt ${attempt + 1}/$attempts for $url: ${e.message}")
@@ -213,6 +381,8 @@ object BridgeHttpClient {
                         return ConditionalHttpResult(code = code, body = null, etag = respEtag, notModified = false)
                     }
                 }
+            } catch (e: HostCooldownException) {
+                return ConditionalHttpResult(code = e.httpCode, body = null, etag = ifNoneMatch, notModified = false)
             } catch (e: IOException) {
                 lastError = e
                 if (Thread.currentThread().isInterrupted) break
@@ -274,6 +444,9 @@ object BridgeHttpClient {
                     }
                     return downloaded
                 }
+            } catch (e: HostCooldownException) {
+                runCatching { partFile.delete() }
+                throw e
             } catch (e: IOException) {
                 lastError = e
                 runCatching { partFile.delete() }
