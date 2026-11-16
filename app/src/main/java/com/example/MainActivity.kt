@@ -145,7 +145,6 @@ class MainActivity : ComponentActivity() {
         AppFilterManager.init(this)
         MediaBridgeStateHolder.init(this)
         LocalHttpServer.start()
-        MediaBridgeForegroundService.start(this, fromForegroundUi = true)
         NotificationRebindHelper.rebindService(this)
         handleIncomingIntent(intent)
 

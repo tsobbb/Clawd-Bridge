@@ -1,6 +1,7 @@
 package com.example.ui.theme
 
 import android.graphics.Bitmap
+import android.graphics.RuntimeShader
 import android.os.Build
 import android.os.SystemClock
 import androidx.compose.animation.animateColorAsState
@@ -22,6 +23,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -33,6 +35,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.ShaderBrush
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
@@ -48,8 +51,6 @@ import com.example.media.ArtworkBlurHelper
 import com.example.media.SmartColorExtractor
 import com.example.model.NowPlayingData
 import com.example.state.BackgroundStyle
-import com.mikepenz.hypnoticcanvas.shaderBackground
-import com.mikepenz.hypnoticcanvas.shaders.MeshGradient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
@@ -507,11 +508,51 @@ internal fun computeGridNinePalette(
 
 /**
  * Unified 4-style living background engine over obsidian base #060709:
- *  1) MESH_SILK (HypnoticCanvas MeshGradient at 1/5 resolution + fallback)
+ *  1) MESH_SILK (Strict Android 13+ AGSL Domain-Warped Mesh Shader at 1/5 resolution + safe Canvas fallback)
  *  2) APPLE_MUSIC (Dual blurred 144px artwork layers + ColorMatrix saturation 1.35x + adaptive scrim)
  *  3) TONAL (Calm 2-3 tone atmospheric gradient built from cover hues)
  *  4) PURE_BLACK (#060709 pure dark base)
  */
+private const val MESH_SILK_AGSL = """
+uniform float2 uResolution;
+uniform float uTime;
+uniform float3 uColor0;
+uniform float3 uColor1;
+uniform float3 uColor2;
+uniform float3 uColor3;
+
+float2 warp(float2 p, float t) {
+    float x = sin(p.y * 2.1 + t * 0.42) * 0.34 + cos(p.x * 1.7 - t * 0.31) * 0.28;
+    float y = cos(p.x * 2.3 + t * 0.37) * 0.34 + sin(p.y * 1.9 + t * 0.29) * 0.28;
+    return p + float2(x, y);
+}
+
+half4 main(float2 fragCoord) {
+    float2 safeRes = float2(max(uResolution.x, 1.0), max(uResolution.y, 1.0));
+    float2 uv = fragCoord / safeRes;
+    float aspect = safeRes.x / safeRes.y;
+    float2 p = float2((uv.x - 0.5) * aspect, uv.y - 0.5) * 1.85;
+
+    float t = uTime * 0.65;
+    float2 q = warp(p, t);
+    float2 r = warp(q * 1.15 + float2(1.4, -0.9), -t * 0.8);
+
+    float w0 = 1.0 - smoothstep(0.0, 1.35, length(r - float2(-0.55, -0.50)));
+    float w1 = 1.0 - smoothstep(0.0, 1.40, length(r - float2(0.60, -0.35)));
+    float w2 = 1.0 - smoothstep(0.0, 1.45, length(r - float2(-0.35, 0.65)));
+    float w3 = 1.0 - smoothstep(0.0, 1.35, length(r - float2(0.55, 0.55)));
+
+    float total = w0 + w1 + w2 + w3 + 0.35;
+    float3 obsidian = float3(0.024, 0.027, 0.035);
+    float3 mesh = (uColor0 * w0 + uColor1 * w1 + uColor2 * w2 + uColor3 * w3 + obsidian * 0.35) / total;
+
+    float fold = 0.5 + 0.5 * sin(r.x * 2.4 + r.y * 2.1 + t * 0.5);
+    mesh = mix(mesh, uColor2 * 0.85 + uColor0 * 0.15, fold * 0.14);
+
+    return half4(clamp(mesh, float3(0.0), float3(1.0)), 1.0);
+}
+"""
+
 @Composable
 fun LivingAuroraBackdrop(
     palette: LivingPaletteState,
@@ -543,39 +584,32 @@ private fun HypnoticMeshSilkBackdrop(
     modifier: Modifier = Modifier
 ) {
     val ext = palette.extendedColorStates
-    val c0 = ext[0].value
-    val c1 = ext[1].value
-    val c2 = ext[2].value
-    val c3 = ext[3].value
-    val c4 = ext[4].value
+    val c0State = ext[0]
+    val c1State = ext[1]
+    val c2State = ext[2]
+    val c3State = ext[3]
+    val c4State = ext[4]
+    val tState = palette.bgTimeSecondsState
     val intensity = if (palette.isTrackActive) 1.0f else 0.82f
-    val meshSpeed = if (palette.isDynamicBgEnabled) 0.42f else 0f
 
-    val darkShadow = remember(c3) { lerp(Color(0xFF060709), c3, 0.45f) }
-    val primaryGlow = remember(c0, intensity) { lerp(Color(0xFF060709), c0, 0.78f * intensity) }
-    val secondaryGlow = remember(c1, intensity) { lerp(Color(0xFF060709), c1, 0.72f * intensity) }
-    val highlightGlow = remember(c2, c4, intensity) {
-        lerp(Color(0xFF060709), lerp(c2, c4, 0.35f), 0.68f * intensity)
+    var shaderFailed by remember { mutableStateOf(false) }
+    val runtimeShader = remember {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            runCatching { RuntimeShader(MESH_SILK_AGSL) }.getOrNull()
+        } else {
+            null
+        }
     }
-
-    val meshShader = remember(darkShadow, primaryGlow, secondaryGlow, highlightGlow) {
-        MeshGradient(
-            colors = arrayOf(
-                primaryGlow,
-                darkShadow,
-                secondaryGlow,
-                highlightGlow
-            ),
-            scale = 1.15f
-        )
+    val shaderBrush = remember(runtimeShader) {
+        runtimeShader?.let { ShaderBrush(it) }
     }
 
     val veilBrush = remember {
         Brush.verticalGradient(
             colors = listOf(
-                Color(0x40060709),
-                Color(0x24060709),
-                Color(0x66060709)
+                Color(0x38060709),
+                Color(0x20060709),
+                Color(0x60060709)
             )
         )
     }
@@ -588,8 +622,8 @@ private fun HypnoticMeshSilkBackdrop(
         val lowW = (maxWidth * 0.2f).coerceAtLeast(72.dp)
         val lowH = (maxHeight * 0.2f).coerceAtLeast(120.dp)
 
-        // Render MeshGradient on a 1/5 resolution surface scaled smoothly 5x on GPU for effortless 120 FPS
-        Box(
+        // Render Mesh Silk on a 1/5 resolution surface scaled smoothly 5x on GPU for effortless 120 FPS
+        Canvas(
             modifier = Modifier
                 .align(Alignment.TopStart)
                 .requiredSize(width = lowW, height = lowH)
@@ -598,16 +632,72 @@ private fun HypnoticMeshSilkBackdrop(
                     scaleY = 5.05f
                     transformOrigin = TransformOrigin(0f, 0f)
                 }
-                .shaderBackground(
-                    shader = meshShader,
-                    speed = meshSpeed,
-                    fallback = {
-                        Brush.linearGradient(
-                            colors = listOf(primaryGlow, darkShadow, secondaryGlow, highlightGlow)
-                        )
-                    }
+        ) {
+            val w = size.width
+            val h = size.height
+            if (w <= 0f || h <= 0f) return@Canvas
+
+            val primaryGlow = lerp(Color(0xFF060709), c0State.value, 0.80f * intensity)
+            val darkShadow = lerp(Color(0xFF060709), c3State.value, 0.45f)
+            val secondaryGlow = lerp(Color(0xFF060709), c1State.value, 0.74f * intensity)
+            val highlightGlow = lerp(
+                Color(0xFF060709),
+                lerp(c2State.value, c4State.value, 0.35f),
+                0.70f * intensity
+            )
+            val t = tState.value
+
+            val shader = if (!shaderFailed) runtimeShader else null
+            val brush = if (!shaderFailed) shaderBrush else null
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && shader != null && brush != null) {
+                val drawn = try {
+                    shader.setFloatUniform("uResolution", w, h)
+                    shader.setFloatUniform("uTime", t)
+                    shader.setFloatUniform("uColor0", primaryGlow.red, primaryGlow.green, primaryGlow.blue)
+                    shader.setFloatUniform("uColor1", darkShadow.red, darkShadow.green, darkShadow.blue)
+                    shader.setFloatUniform("uColor2", secondaryGlow.red, secondaryGlow.green, secondaryGlow.blue)
+                    shader.setFloatUniform("uColor3", highlightGlow.red, highlightGlow.green, highlightGlow.blue)
+                    drawRect(brush = brush)
+                    true
+                } catch (_: Throwable) {
+                    shaderFailed = true
+                    false
+                }
+                if (drawn) return@Canvas
+            }
+
+            // Crash-proof Canvas silk mesh fallback (used on API < 33 or if a driver rejects AGSL)
+            drawRect(
+                brush = Brush.linearGradient(
+                    colors = listOf(primaryGlow, darkShadow, secondaryGlow)
                 )
-        )
+            )
+            val radius = max(w, h) * 0.85f
+            drawSoftCloud(
+                center = Offset(w * (0.28f + 0.22f * sin(t * 0.35f)), h * (0.26f + 0.16f * cos(t * 0.28f))),
+                radius = radius,
+                color = primaryGlow,
+                alpha = 0.72f,
+                scaleX = 1.2f,
+                scaleY = 0.95f
+            )
+            drawSoftCloud(
+                center = Offset(w * (0.74f - 0.20f * cos(t * 0.31f)), h * (0.48f + 0.18f * sin(t * 0.24f))),
+                radius = radius,
+                color = secondaryGlow,
+                alpha = 0.68f,
+                scaleX = 0.95f,
+                scaleY = 1.25f
+            )
+            drawSoftCloud(
+                center = Offset(w * (0.45f + 0.24f * sin(t * 0.27f + 1.4f)), h * (0.78f - 0.14f * cos(t * 0.33f))),
+                radius = radius,
+                color = highlightGlow,
+                alpha = 0.62f,
+                scaleX = 1.15f,
+                scaleY = 1.05f
+            )
+        }
 
         Box(
             modifier = Modifier
