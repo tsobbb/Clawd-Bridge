@@ -117,6 +117,8 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.asImageBitmap
@@ -135,11 +137,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.lyrics.LyricsCatalogResolver
 import com.example.lyrics.LyricsInterlude
 import com.example.lyrics.LyricsLine
+import com.example.lyrics.LyricsSyncMode
 import com.example.model.NowPlayingData
 import com.example.state.PlayerAccentSource
 import com.example.state.PlayerBackgroundMode
@@ -209,6 +213,87 @@ internal fun computeCompensatedSeekTargetMs(
 ): Long {
     val raw = targetDisplayMs - syncOffsetMs.toLong()
     return if (durationMs > 0L) raw.coerceIn(0L, durationMs) else raw.coerceAtLeast(0L)
+}
+
+internal data class LyricTextToken(
+    val text: String,
+    val isWord: Boolean,
+    val wordOrdinal: Int
+)
+
+private val LYRIC_TOKEN_REGEX = Regex("""\S+|\s+""")
+
+internal fun tokenizeLyricWords(text: String): List<LyricTextToken> {
+    if (text.isEmpty()) return emptyList()
+    var wordCount = 0
+    return LYRIC_TOKEN_REGEX.findAll(text).map { match ->
+        val chunk = match.value
+        val isWord = chunk.any { !it.isWhitespace() }
+        val ord = if (isWord) wordCount++ else -1
+        LyricTextToken(text = chunk, isWord = isWord, wordOrdinal = ord)
+    }.toList()
+}
+
+/**
+ * Computes active word ordinal and continuous transition fraction [0f..1f] inside an active line.
+ * - For WORD_SYNCED lines (`line.words.isNotEmpty()`), uses authentic `<mm:ss.xx>` word timestamps.
+ * - For LINE_SYNCED lines (`line.words.isEmpty()`), interpolates smoothly across word tokens
+ *   weighted by character length over `[line.timeMs .. nextLineTimeMs]`.
+ */
+internal fun computeLineWordHighlightState(
+    line: LyricsLine,
+    nextLineTimeMs: Long,
+    positionMs: Long
+): Pair<Int, Float> {
+    if (line.words.isNotEmpty()) {
+        val words = line.words
+        if (positionMs < words.first().startMs) {
+            return -1 to 0f
+        }
+        var activeIdx = 0
+        for (i in words.indices) {
+            if (words[i].startMs <= positionMs) {
+                activeIdx = i
+            } else {
+                break
+            }
+        }
+        val wordStart = words[activeIdx].startMs
+        val wordEnd = words.getOrNull(activeIdx + 1)?.startMs
+            ?: nextLineTimeMs.coerceAtLeast(wordStart + 350L)
+        val span = (wordEnd - wordStart).coerceAtLeast(120L).toFloat()
+        val frac = ((positionMs - wordStart).toFloat() / span).coerceIn(0f, 1f)
+        return activeIdx to frac
+    }
+
+    val wordTokens = tokenizeLyricWords(line.text).filter { it.isWord }
+    if (wordTokens.isEmpty()) return 0 to 1f
+
+    val rawLineSpanMs = (nextLineTimeMs - line.timeMs).coerceIn(750L, 12_000L)
+    val effectiveDurationMs = (rawLineSpanMs.toFloat() * 0.90f).coerceAtLeast(600f)
+    val overall = ((positionMs - line.timeMs).toFloat() / effectiveDurationMs).coerceIn(0f, 1f)
+    if (overall >= 1f) {
+        return wordTokens.lastIndex to 1f
+    }
+    if (overall <= 0f) {
+        return 0 to 0f
+    }
+
+    val weights = FloatArray(wordTokens.size) { idx ->
+        (wordTokens[idx].text.length.coerceAtLeast(1) + 1).toFloat()
+    }
+    val totalWeight = weights.sum().coerceAtLeast(1f)
+    val targetWeight = overall * totalWeight
+    var acc = 0f
+    for (i in wordTokens.indices) {
+        val w = weights[i]
+        if (targetWeight <= acc + w || i == wordTokens.lastIndex) {
+            val frac = ((targetWeight - acc) / w).coerceIn(0f, 1f)
+            return i to frac
+        }
+        acc += w
+    }
+    return wordTokens.lastIndex to 1f
 }
 
 internal fun formatPlayerClock(ms: Long): String {
@@ -352,12 +437,18 @@ private fun FullscreenPlayerContent(
 
     // 60/120 FPS client-side display position state — NEVER read at this parent scope!
     val displayPositionMsState = remember { mutableLongStateOf(track.positionMs) }
+    val localSeekGraceUntilMsState = remember { mutableLongStateOf(0L) }
     val isScrubbingState = remember { mutableStateOf(false) }
     val scrubPositionMsState = remember { mutableLongStateOf(track.positionMs) }
     val shownPositionMsState = remember {
         derivedStateOf {
             if (isScrubbingState.value) scrubPositionMsState.longValue else displayPositionMsState.longValue
         }
+    }
+
+    LaunchedEffect(track.player, track.title, track.artist) {
+        localSeekGraceUntilMsState.longValue = 0L
+        displayPositionMsState.longValue = track.positionMs
     }
 
     LaunchedEffect(
@@ -369,7 +460,9 @@ private fun FullscreenPlayerContent(
         track.artist,
         track.hasMedia
     ) {
-        displayPositionMsState.longValue = track.positionMs
+        if (SystemClock.elapsedRealtime() >= localSeekGraceUntilMsState.longValue) {
+            displayPositionMsState.longValue = track.positionMs
+        }
         if (track.hasMedia && track.isPlaying) {
             var lastNanos = 0L
             while (isActive) {
@@ -388,6 +481,18 @@ private fun FullscreenPlayerContent(
                 }
             }
         }
+    }
+
+    val seekToDisplayTarget: (Long) -> Unit = { targetDisplayMs ->
+        val clampedDisplay = if (track.durationMs > 0L) {
+            targetDisplayMs.coerceIn(0L, track.durationMs)
+        } else {
+            targetDisplayMs.coerceAtLeast(0L)
+        }
+        localSeekGraceUntilMsState.longValue = SystemClock.elapsedRealtime() + 650L
+        displayPositionMsState.longValue = clampedDisplay
+        val rawSeek = computeCompensatedSeekTargetMs(clampedDisplay, track.durationMs, syncOffsetMs)
+        onSeekToRawMs(rawSeek)
     }
 
     val effectiveAccent = if (styleConfig.accentSource == PlayerAccentSource.COVER) {
@@ -504,11 +609,10 @@ private fun FullscreenPlayerContent(
                             context = context,
                             track = track,
                             shownPositionMsState = shownPositionMsState,
-                            syncOffsetMs = syncOffsetMs,
                             effectiveAccent = effectiveAccent,
                             livingPalette = livingPalette,
                             lyricsState = lyricsState,
-                            onSeekToRawMs = onSeekToRawMs,
+                            onSeekToDisplayMs = seekToDisplayTarget,
                             onRefreshLyrics = { onRefreshLyrics(null) },
                             onOpenProviderMenu = { showOverflowSheet = true }
                         )
@@ -547,9 +651,7 @@ private fun FullscreenPlayerContent(
                         },
                         onScrubEnd = { targetMs ->
                             isScrubbingState.value = false
-                            displayPositionMsState.longValue = targetMs
-                            val rawSeek = computeCompensatedSeekTargetMs(targetMs, track.durationMs, syncOffsetMs)
-                            onSeekToRawMs(rawSeek)
+                            seekToDisplayTarget(targetMs)
                         }
                     )
 
@@ -559,7 +661,14 @@ private fun FullscreenPlayerContent(
                     PlayerTransportControls(
                         isPlaying = track.isPlaying,
                         accentColor = effectiveAccent,
-                        onSeekMinus10 = { onSeekByDelta(-10_000L) },
+                        onSeekMinus10 = {
+                            val nextDisplay = (displayPositionMsState.longValue - 10_000L).let {
+                                if (track.durationMs > 0L) it.coerceIn(0L, track.durationMs) else it.coerceAtLeast(0L)
+                            }
+                            localSeekGraceUntilMsState.longValue = SystemClock.elapsedRealtime() + 650L
+                            displayPositionMsState.longValue = nextDisplay
+                            onSeekByDelta(-10_000L)
+                        },
                         onPrevious = {
                             haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                             onSkipPrevious()
@@ -572,7 +681,14 @@ private fun FullscreenPlayerContent(
                             haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                             onSkipNext()
                         },
-                        onSeekPlus10 = { onSeekByDelta(10_000L) }
+                        onSeekPlus10 = {
+                            val nextDisplay = (displayPositionMsState.longValue + 10_000L).let {
+                                if (track.durationMs > 0L) it.coerceIn(0L, track.durationMs) else it.coerceAtLeast(0L)
+                            }
+                            localSeekGraceUntilMsState.longValue = SystemClock.elapsedRealtime() + 650L
+                            displayPositionMsState.longValue = nextDisplay
+                            onSeekByDelta(10_000L)
+                        }
                     )
 
                     Spacer(modifier = Modifier.height(14.dp))
@@ -669,6 +785,9 @@ private fun PlayerDynamicBackdrop(
                     .background(if (blurSource != null) Color(0xFF07080B) else Color(0x3806080C))
             ) {
                 if (blurSource != null) {
+                    val saturatedFilter = remember {
+                        ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(1.35f) })
+                    }
                     val blurMod = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                         Modifier.blur(95.dp)
                     } else {
@@ -678,6 +797,7 @@ private fun PlayerDynamicBackdrop(
                         bitmap = blurSource,
                         contentDescription = null,
                         contentScale = ContentScale.Crop,
+                        colorFilter = saturatedFilter,
                         modifier = Modifier
                             .fillMaxSize()
                             .graphicsLayer {
@@ -881,8 +1001,8 @@ private fun PlayerOverflowOptionsSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = Color(0xFF14171E),
-        scrimColor = SheetScrim,
+        containerColor = Color(0xF713161D),
+        scrimColor = Color.Black.copy(alpha = 0.38f),
         dragHandle = { BottomSheetDefaults.DragHandle(color = TextMuted.copy(alpha = 0.5f)) }
     ) {
         Column(
@@ -1216,11 +1336,10 @@ private fun PlayerLyricsStage(
     context: Context,
     track: NowPlayingData,
     shownPositionMsState: State<Long>,
-    syncOffsetMs: Int,
     effectiveAccent: Color,
     livingPalette: LivingPaletteState,
     lyricsState: PlayerLyricsUiState,
-    onSeekToRawMs: (Long) -> Unit,
+    onSeekToDisplayMs: (Long) -> Unit,
     onRefreshLyrics: () -> Unit,
     onOpenProviderMenu: () -> Unit
 ) {
@@ -1315,13 +1434,16 @@ private fun PlayerLyricsStage(
                             }
                         }
                     }
-                } else if (res.synced && res.lines.isNotEmpty()) {
+                } else if (res.syncMode != LyricsSyncMode.UNSYNCED && res.lines.isNotEmpty()) {
                     val listState = rememberLazyListState()
                     var viewportHeightPx by remember { mutableIntStateOf(0) }
                     val activeIndex by remember(res.lines) {
                         derivedStateOf {
                             findActiveLyricsLineIndex(res.lines, shownPositionMsState.value)
                         }
+                    }
+                    val canScrollForward by remember {
+                        derivedStateOf { listState.canScrollForward }
                     }
                     var lastUserScrollMs by remember { mutableLongStateOf(0L) }
                     LaunchedEffect(listState.isScrollInProgress) {
@@ -1359,7 +1481,10 @@ private fun PlayerLyricsStage(
                             verticalArrangement = Arrangement.spacedBy(18.dp),
                             modifier = Modifier
                                 .fillMaxSize()
-                                .lyricsVerticalEdgeFade()
+                                .lyricsVerticalEdgeFade(
+                                    fadeTopDp = 24.dp,
+                                    fadeBottomDp = if (canScrollForward) 24.dp else 0.dp
+                                )
                                 .testTag("synced_lyrics_list")
                         ) {
                             itemsIndexed(
@@ -1385,16 +1510,11 @@ private fun PlayerLyricsStage(
                                     index = index,
                                     activeIndex = activeIndex,
                                     nextLineTimeMs = nextLineTimeMs,
+                                    isUserScrolling = listState.isScrollInProgress,
                                     shownPositionMsState = shownPositionMsState,
-                                    accentColor = effectiveAccent,
                                     onSeekToLine = {
                                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                        val rawTarget = computeCompensatedSeekTargetMs(
-                                            targetDisplayMs = line.timeMs,
-                                            durationMs = track.durationMs,
-                                            syncOffsetMs = syncOffsetMs
-                                        )
-                                        onSeekToRawMs(rawTarget)
+                                        onSeekToDisplayMs(line.timeMs)
                                         lastUserScrollMs = 0L
                                     },
                                     onCopyQuote = {
@@ -1412,10 +1532,15 @@ private fun PlayerLyricsStage(
                             }
 
                             item {
-                                Text(
-                                    text = "Источник: ${res.source.uppercase(Locale.US)} • Синхронный текст • Долгое нажатие — копировать",
-                                    style = MaterialTheme.typography.labelSmall.copy(color = TextMuted),
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 12.dp)
+                                LyricsProviderFooter(
+                                    source = res.source,
+                                    syncLabel = if (res.syncMode == LyricsSyncMode.WORD_SYNCED) {
+                                        "Пословный текст • Долгое нажатие — копировать"
+                                    } else {
+                                        "Синхронный текст • Долгое нажатие — копировать"
+                                    },
+                                    accentColor = effectiveAccent,
+                                    onOpenProviderMenu = onOpenProviderMenu
                                 )
                             }
                         }
@@ -1459,13 +1584,20 @@ private fun PlayerLyricsStage(
                         }
                     }
                 } else {
-                    // Honest Unsynced Lyrics UI (top frosted banner + clean manual scroll)
+                    // Honest Unsynced Lyrics UI (top frosted banner + crisp >=0.85 alpha + provider footer)
+                    val unsyncedScrollState = rememberScrollState()
+                    val canScrollForward by remember {
+                        derivedStateOf { unsyncedScrollState.canScrollForward }
+                    }
                     Column(
                         modifier = Modifier
                             .fillMaxSize()
-                            .verticalScroll(rememberScrollState())
-                            .lyricsVerticalEdgeFade()
-                            .padding(horizontal = 6.dp, vertical = 12.dp),
+                            .lyricsVerticalEdgeFade(
+                                fadeTopDp = 24.dp,
+                                fadeBottomDp = if (canScrollForward) 24.dp else 0.dp
+                            )
+                            .verticalScroll(unsyncedScrollState)
+                            .padding(start = 6.dp, end = 6.dp, top = 48.dp, bottom = 140.dp),
                         verticalArrangement = Arrangement.spacedBy(16.dp)
                     ) {
                         Surface(
@@ -1547,16 +1679,72 @@ private fun PlayerLyricsStage(
                         Text(
                             text = res.plainLyrics,
                             style = MaterialTheme.typography.bodyLarge.copy(
-                                fontSize = 18.sp,
-                                lineHeight = 28.sp,
-                                color = Color(0xFFE4E4E7),
-                                fontWeight = FontWeight.Normal
+                                fontSize = 19.sp,
+                                lineHeight = 29.sp,
+                                color = Color.White.copy(alpha = 0.90f),
+                                fontWeight = FontWeight.Medium
                             ),
                             modifier = Modifier.padding(horizontal = 4.dp)
+                        )
+
+                        LyricsProviderFooter(
+                            source = res.source,
+                            syncLabel = "Обычный текст (без таймкодов)",
+                            accentColor = effectiveAccent,
+                            onOpenProviderMenu = onOpenProviderMenu
                         )
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun LyricsProviderFooter(
+    source: String,
+    syncLabel: String,
+    accentColor: Color,
+    onOpenProviderMenu: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+            Text(
+                text = "Источник: ${source.uppercase(Locale.US)}",
+                style = MaterialTheme.typography.labelMedium.copy(
+                    color = TextSecondary,
+                    fontWeight = FontWeight.SemiBold
+                )
+            )
+            Text(
+                text = syncLabel,
+                style = MaterialTheme.typography.labelSmall.copy(color = TextMuted)
+            )
+        }
+        Surface(
+            shape = RoundedCornerShape(999.dp),
+            color = SecondaryGlass,
+            border = BorderStroke(0.5.dp, SpecularStroke),
+            modifier = Modifier
+                .minimumInteractiveComponentSize()
+                .clip(RoundedCornerShape(999.dp))
+                .clickable(onClick = onOpenProviderMenu)
+                .testTag("lyrics_footer_provider_button")
+        ) {
+            Text(
+                text = "Сменить источник",
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                style = MaterialTheme.typography.labelSmall.copy(
+                    color = accentColor,
+                    fontWeight = FontWeight.SemiBold
+                )
+            )
         }
     }
 }
@@ -1610,8 +1798,8 @@ private fun SyncedLyricLineRow(
     index: Int,
     activeIndex: Int,
     nextLineTimeMs: Long,
+    isUserScrolling: Boolean,
     shownPositionMsState: State<Long>,
-    accentColor: Color,
     onSeekToLine: () -> Unit,
     onCopyQuote: () -> Unit
 ) {
@@ -1625,18 +1813,19 @@ private fun SyncedLyricLineRow(
         else -> 0.95f
     }
     val targetAlpha = when {
-        activeIndex < 0 -> 0.58f
+        isUserScrolling -> if (isActive) 1.0f else 0.88f
+        activeIndex < 0 -> 0.65f
         isActive -> 1.0f
-        distance == 1 -> 0.50f
-        distance == 2 -> 0.30f
-        else -> 0.18f
+        distance == 1 -> 0.58f
+        distance == 2 -> 0.44f
+        else -> 0.30f
     }
 
     val animSpec = remember {
         spring<Float>(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow)
     }
     val lineScale by animateFloatAsState(targetValue = targetScale, animationSpec = animSpec, label = "lyric_scale")
-    val lineAlpha by animateFloatAsState(targetValue = targetAlpha, animationSpec = tween(260), label = "lyric_alpha")
+    val lineAlpha by animateFloatAsState(targetValue = targetAlpha, animationSpec = tween(220), label = "lyric_alpha")
 
     val rowModifier = Modifier
         .fillMaxWidth()
@@ -1653,31 +1842,60 @@ private fun SyncedLyricLineRow(
         )
         .padding(horizontal = 8.dp, vertical = 4.dp)
 
-    if (isActive && line.words.isNotEmpty()) {
-        val highlightedWordIdx by remember(line) {
+    if (isActive) {
+        val unreadColor = Color.White.copy(alpha = 0.54f)
+        val wordProgress by remember(line, nextLineTimeMs) {
             derivedStateOf {
-                val pos = shownPositionMsState.value
-                var wIdx = 0
-                for (i in line.words.indices) {
-                    if (line.words[i].startMs <= pos) wIdx = i else break
-                }
-                wIdx
+                val (wIdx, rawFrac) = computeLineWordHighlightState(
+                    line = line,
+                    nextLineTimeMs = nextLineTimeMs,
+                    positionMs = shownPositionMsState.value
+                )
+                // Quantize fraction to 5% steps (~20 steps/word) so scrolling text stays 120fps light
+                val step = ((rawFrac * 20f).toInt().coerceIn(0, 20)) / 20f
+                wIdx to step
             }
         }
-        val annotated = remember(line.words, highlightedWordIdx, accentColor) {
-            buildAnnotatedString {
-                line.words.forEachIndexed { wIndex, w ->
-                    val style = when {
-                        wIndex < highlightedWordIdx -> SpanStyle(color = Color.White)
-                        wIndex == highlightedWordIdx -> SpanStyle(color = accentColor)
-                        else -> SpanStyle(color = Color.White.copy(alpha = 0.45f))
+        val activeWordIdx = wordProgress.first
+        val activeWordFrac = wordProgress.second
+
+        val annotated = if (line.words.isNotEmpty()) {
+            remember(line.words, activeWordIdx, activeWordFrac) {
+                buildAnnotatedString {
+                    line.words.forEachIndexed { wIndex, w ->
+                        val wordColor = when {
+                            wIndex < activeWordIdx -> Color.White
+                            wIndex == activeWordIdx -> lerp(unreadColor, Color.White, activeWordFrac)
+                            else -> unreadColor
+                        }
+                        withStyle(SpanStyle(color = wordColor)) {
+                            append(w.text)
+                        }
                     }
-                    withStyle(style) {
-                        append(w.text)
+                }
+            }
+        } else {
+            val tokens = remember(line.text) { tokenizeLyricWords(line.text) }
+            remember(tokens, activeWordIdx, activeWordFrac) {
+                buildAnnotatedString {
+                    tokens.forEach { token ->
+                        if (!token.isWord) {
+                            append(token.text)
+                        } else {
+                            val wordColor = when {
+                                token.wordOrdinal < activeWordIdx -> Color.White
+                                token.wordOrdinal == activeWordIdx -> lerp(unreadColor, Color.White, activeWordFrac)
+                                else -> unreadColor
+                            }
+                            withStyle(SpanStyle(color = wordColor)) {
+                                append(token.text)
+                            }
+                        }
                     }
                 }
             }
         }
+
         Text(
             text = annotated,
             style = MaterialTheme.typography.titleLarge.copy(
@@ -1686,40 +1904,6 @@ private fun SyncedLyricLineRow(
                 fontWeight = FontWeight.Bold
             ),
             modifier = rowModifier
-        )
-    } else if (isActive) {
-        // Horizontal vocal sweep highlight across the active line with zero recompositions
-        val lineDuration = (nextLineTimeMs - line.timeMs).coerceIn(900L, 12_000L).toFloat()
-        Text(
-            text = line.text,
-            style = MaterialTheme.typography.titleLarge.copy(
-                fontSize = 21.sp,
-                lineHeight = 29.sp,
-                fontWeight = FontWeight.Bold,
-                color = Color.White
-            ),
-            modifier = rowModifier
-                .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)
-                .drawWithContent {
-                    drawContent()
-                    val pos = shownPositionMsState.value
-                    val progress = ((pos - line.timeMs).toFloat() / lineDuration).coerceIn(0f, 1f)
-                    val edgeEnd = (progress + 0.10f).coerceIn(0.02f, 1f)
-                    drawRect(
-                        brush = Brush.horizontalGradient(
-                            colorStops = arrayOf(
-                                0.0f to Color.White,
-                                progress.coerceIn(0f, 0.98f) to Color.White,
-                                edgeEnd to Color.White.copy(alpha = 0.56f),
-                                1.0f to Color.White.copy(alpha = 0.56f)
-                            ),
-                            startX = 0f,
-                            endX = size.width.coerceAtLeast(1f)
-                        ),
-                        size = Size(size.width, size.height),
-                        blendMode = BlendMode.Modulate
-                    )
-                }
         )
     } else {
         Text(
@@ -2178,8 +2362,8 @@ private fun PlayerStyleSettingsSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = Color(0xF512151C),
-        scrimColor = Color.Black.copy(alpha = 0.25f),
+        containerColor = Color(0xF513161D),
+        scrimColor = Color.Black.copy(alpha = 0.35f),
         dragHandle = { BottomSheetDefaults.DragHandle(color = TextMuted.copy(alpha = 0.5f)) }
     ) {
         Column(
@@ -2376,7 +2560,14 @@ private fun PlayerTrackInfoSheet(
                         is PlayerLyricsUiState.Loaded -> {
                             val r = lyricsState.result
                             if (!r.found) "Не найдена"
-                            else "${r.source.uppercase(Locale.US)} (${if (r.synced) "синхронный LRC" else "обычный текст"})"
+                            else {
+                                val modeText = when (r.syncMode) {
+                                    LyricsSyncMode.WORD_SYNCED -> "пословный LRC"
+                                    LyricsSyncMode.LINE_SYNCED -> "синхронный LRC"
+                                    LyricsSyncMode.UNSYNCED -> "обычный текст"
+                                }
+                                "${r.source.uppercase(Locale.US)} ($modeText)"
+                            }
                         }
                         is PlayerLyricsUiState.Error -> "Ошибка: ${lyricsState.message}"
                         is PlayerLyricsUiState.Idle -> "Ожидание"
@@ -2437,16 +2628,28 @@ private fun InfoRow(label: String, value: String) {
     }
 }
 
-private fun Modifier.lyricsVerticalEdgeFade(): Modifier = this
+private fun Modifier.lyricsVerticalEdgeFade(
+    fadeTopDp: Dp = 24.dp,
+    fadeBottomDp: Dp = 24.dp
+): Modifier = this
     .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)
     .drawWithContent {
         drawContent()
+        val h = size.height.coerceAtLeast(1f)
+        val topFrac = if (fadeTopDp > 0.dp) (fadeTopDp.toPx() / h).coerceIn(0f, 0.30f) else 0f
+        val bottomFrac = if (fadeBottomDp > 0.dp) {
+            (1f - (fadeBottomDp.toPx() / h).coerceIn(0f, 0.30f)).coerceIn(topFrac + 0.01f, 1f)
+        } else {
+            1f
+        }
+        val topEdge = if (fadeTopDp > 0.dp) Color.Transparent else Color.Black
+        val bottomEdge = if (fadeBottomDp > 0.dp) Color.Transparent else Color.Black
         drawRect(
             brush = Brush.verticalGradient(
-                0.0f to Color.Transparent,
-                0.08f to Color.Black,
-                0.88f to Color.Black,
-                1.0f to Color.Transparent
+                0.0f to topEdge,
+                topFrac to Color.Black,
+                bottomFrac to Color.Black,
+                1.0f to bottomEdge
             ),
             blendMode = BlendMode.DstIn
         )

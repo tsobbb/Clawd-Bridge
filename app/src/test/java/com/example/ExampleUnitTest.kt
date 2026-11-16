@@ -294,8 +294,8 @@ class ExampleUnitTest {
         }
         val result = com.example.media.SmartColorExtractor.extractFromPixels(pixels, 32, 32)
         assertTrue("B&W manga cover must be detected as monochrome", result.isMonochrome)
-        assertEquals(0xF4F4F5, result.playerAccentRgb)
-        assertEquals(listOf(0x52525B, 0xA1A1AA, 0xF4F4F5), result.paletteTriadRgb)
+        assertEquals(com.example.media.SmartColorExtractor.MONOCHROME_ACCENT_RGB, result.playerAccentRgb)
+        assertEquals(listOf(0x525252, 0xA3A3A3, 0xF5F5F5), result.paletteTriadRgb)
 
         val grayAccent = com.example.ui.theme.ContrastGuard.normalizePlayerAccentRgb(0x808080)
         val grayHsl = com.example.ui.theme.ContrastGuard.rgbToHsl(grayAccent)
@@ -489,13 +489,25 @@ class ExampleUnitTest {
 
     @Test
     fun `verify BackgroundStyle enum and 6-color and 3x3 LivingThemeEngine palettes`() {
-        assertEquals(5, com.example.state.BackgroundStyle.entries.size)
+        assertEquals(4, com.example.state.BackgroundStyle.entries.size)
         assertEquals(
             com.example.state.BackgroundStyle.PURE_BLACK,
             com.example.state.BackgroundStyle.fromId("pure_black")
         )
         assertEquals(
-            com.example.state.BackgroundStyle.LIQUID_SILK,
+            com.example.state.BackgroundStyle.MESH_SILK,
+            com.example.state.BackgroundStyle.fromId("liquid_silk")
+        )
+        assertEquals(
+            com.example.state.BackgroundStyle.MESH_SILK,
+            com.example.state.BackgroundStyle.fromId("mesh_grid_3x3")
+        )
+        assertEquals(
+            com.example.state.BackgroundStyle.TONAL,
+            com.example.state.BackgroundStyle.fromId("aurora")
+        )
+        assertEquals(
+            com.example.state.BackgroundStyle.MESH_SILK,
             com.example.state.BackgroundStyle.fromId("unknown_style")
         )
 
@@ -638,6 +650,161 @@ class ExampleUnitTest {
         )
         assertTrue(notModifiedRes.notModified)
         assertEquals(304, notModifiedRes.code)
+    }
+
+    @Test
+    fun `verify MediaBridgeForegroundService blocks background FGS starts on Android 12 plus`() {
+        // Android 11 (API 30) and earlier allow starting FGS from background
+        assertTrue(
+            com.example.service.MediaBridgeForegroundService.canAttemptForegroundStart(
+                sdkInt = 30,
+                fromForegroundUi = false,
+                isAppInForeground = false
+            )
+        )
+        // Android 12+ (API 31+) must defer when app is in background
+        assertFalse(
+            com.example.service.MediaBridgeForegroundService.canAttemptForegroundStart(
+                sdkInt = 31,
+                fromForegroundUi = false,
+                isAppInForeground = false
+            )
+        )
+        assertFalse(
+            com.example.service.MediaBridgeForegroundService.canAttemptForegroundStart(
+                sdkInt = 34,
+                fromForegroundUi = false,
+                isAppInForeground = false
+            )
+        )
+        // Allowed when triggered directly from Foreground UI or resumed Activity
+        assertTrue(
+            com.example.service.MediaBridgeForegroundService.canAttemptForegroundStart(
+                sdkInt = 34,
+                fromForegroundUi = true,
+                isAppInForeground = false
+            )
+        )
+        assertTrue(
+            com.example.service.MediaBridgeForegroundService.canAttemptForegroundStart(
+                sdkInt = 34,
+                fromForegroundUi = false,
+                isAppInForeground = true
+            )
+        )
+    }
+
+    @Test
+    fun `verify SmartColorExtractor keeps dark crimson honest with max 8 deg hue spread`() {
+        // Dark obsidian cover with ~2.5% subtle crimson lettering (must clear 1.2% cutoff)
+        val pixels = IntArray(32 * 32) { idx ->
+            if (idx % 40 == 0) 0xFF991B1B.toInt() else 0xFF0A0A0D.toInt()
+        }
+        val res = com.example.media.SmartColorExtractor.extractFromPixels(pixels, 32, 32)
+        assertFalse("Cover with 2.5% dark crimson must NOT be treated as monochrome", res.isMonochrome)
+
+        val baseHue = com.example.media.SmartColorExtractor.rgbToHsl(res.paletteTriadRgb.first()).h
+        res.paletteExtendedRgb.forEach { rgb ->
+            val hsl = com.example.media.SmartColorExtractor.rgbToHsl(rgb)
+            if (hsl.s > 0.15f) {
+                val rawDiff = kotlin.math.abs(hsl.h - baseHue)
+                val circularDiff = minOf(rawDiff, 360f - rawDiff)
+                assertTrue(
+                    "Monotonic red cover hue drift ($circularDiff deg) must stay <= 12 deg (never mustard/orange)",
+                    circularDiff <= 12f
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `verify ArtworkExtractor computeTargetArtworkSidePx preserves HD and caps cleanly`() {
+        assertEquals(160, com.example.media.ArtworkExtractor.computeTargetArtworkSidePx(160))
+        assertEquals(600, com.example.media.ArtworkExtractor.computeTargetArtworkSidePx(600))
+        assertEquals(768, com.example.media.ArtworkExtractor.computeTargetArtworkSidePx(1024))
+    }
+
+    @Test
+    fun `verify LyricsSyncMode classification with BOM and computeLineWordHighlightState progression`() {
+        val bomLrc = "\uFEFF[00:10.00]First line here\n[00:14.00]Second line"
+        val lineParsed = com.example.lyrics.LyricsCatalogResolver.parseLrcLines(bomLrc)
+        assertEquals(2, lineParsed.size)
+        assertEquals(10_000L, lineParsed[0].timeMs)
+
+        val lineSyncedRes = com.example.lyrics.LyricsResult(
+            found = true,
+            source = "lrclib",
+            artist = "Artist",
+            title = "Song",
+            synced = true,
+            syncedLyrics = bomLrc,
+            plainLyrics = "First line here\nSecond line",
+            lines = lineParsed
+        )
+        assertEquals(com.example.lyrics.LyricsSyncMode.LINE_SYNCED, lineSyncedRes.syncMode)
+
+        val wordLine = com.example.lyrics.LyricsLine(
+            timeMs = 10_000L,
+            text = "alpha bravo charlie",
+            words = listOf(
+                com.example.lyrics.LyricWord(10_000L, "alpha "),
+                com.example.lyrics.LyricWord(11_000L, "bravo "),
+                com.example.lyrics.LyricWord(12_000L, "charlie")
+            )
+        )
+        val wordSyncedRes = lineSyncedRes.copy(lines = listOf(wordLine))
+        assertEquals(com.example.lyrics.LyricsSyncMode.WORD_SYNCED, wordSyncedRes.syncMode)
+
+        val unsyncedRes = lineSyncedRes.copy(synced = false, syncedLyrics = "", lines = emptyList())
+        assertEquals(com.example.lyrics.LyricsSyncMode.UNSYNCED, unsyncedRes.syncMode)
+
+        // Word progression on LINE_SYNCED line across [10_000 .. 14_000]
+        val lineNoWords = com.example.lyrics.LyricsLine(timeMs = 10_000L, text = "Hello bright world")
+        val (idxStart, _) = com.example.ui.components.computeLineWordHighlightState(lineNoWords, 14_000L, 10_050L)
+        val (idxMid, _) = com.example.ui.components.computeLineWordHighlightState(lineNoWords, 14_000L, 12_000L)
+        val (idxEnd, fracEnd) = com.example.ui.components.computeLineWordHighlightState(lineNoWords, 14_000L, 13_900L)
+        assertEquals(0, idxStart)
+        assertTrue("Midpoint should advance past first word (was $idxMid)", idxMid >= 1)
+        assertEquals(2, idxEnd)
+        assertEquals(1f, fracEnd, 0.01f)
+
+        // Exact word progression on WORD_SYNCED line
+        val (wIdx, _) = com.example.ui.components.computeLineWordHighlightState(wordLine, 14_000L, 11_400L)
+        assertEquals(1, wIdx)
+    }
+
+    @Test
+    fun `verify MediaBridgeStateHolder resolveGraceAdjustedPositionMs holds seek during 650ms window`() {
+        val heldPaused = com.example.state.MediaBridgeStateHolder.resolveGraceAdjustedPositionMs(
+            calculatedPosMs = 5_000L,
+            nowElapsedMs = 1_200L,
+            graceUntilElapsedMs = 1_650L,
+            graceTargetPosMs = 42_000L,
+            durationMs = 180_000L,
+            isPlaying = false
+        )
+        assertEquals(42_000L, heldPaused)
+
+        val heldPlaying = com.example.state.MediaBridgeStateHolder.resolveGraceAdjustedPositionMs(
+            calculatedPosMs = 5_000L,
+            nowElapsedMs = 1_250L, // 250ms into grace started at 1000ms (1650 - 650)
+            graceUntilElapsedMs = 1_650L,
+            graceTargetPosMs = 42_000L,
+            durationMs = 180_000L,
+            isPlaying = true,
+            playbackSpeed = 1.0f
+        )
+        assertEquals(42_250L, heldPlaying)
+
+        val afterExpiry = com.example.state.MediaBridgeStateHolder.resolveGraceAdjustedPositionMs(
+            calculatedPosMs = 42_700L,
+            nowElapsedMs = 1_700L,
+            graceUntilElapsedMs = 1_650L,
+            graceTargetPosMs = 42_000L,
+            durationMs = 180_000L,
+            isPlaying = true
+        )
+        assertEquals(42_700L, afterExpiry)
     }
 }
 

@@ -12,6 +12,7 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import com.example.ClawdBridgeApplication
 import com.example.MainActivity
 import com.example.R
 import com.example.server.LocalHttpServer
@@ -45,16 +46,24 @@ class MediaBridgeForegroundService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.i(TAG, "MediaBridgeForegroundService onStartCommand (START_STICKY)")
 
-        // 1. Promote to Foreground Service (specialUse avoids Android 15 6-hour dataSync cap)
+        // 1. Promote to Foreground Service safely (specialUse avoids Android 15 6-hour dataSync cap)
         val notification = buildForegroundNotification()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+        } catch (t: Throwable) {
+            Log.i(TAG, "Deferred startForeground in background (NotificationListener & HTTP continue): ${t.message}")
+            LocalHttpServer.start()
+            NotificationRebindHelper.rebindService(this)
+            stopSelfResult(startId)
+            return START_NOT_STICKY
         }
 
         // 2. Ensure Local HTTP server is running
@@ -168,7 +177,29 @@ class MediaBridgeForegroundService : Service() {
         private const val NOTIFICATION_ID = 44444
         private const val WATCHDOG_INTERVAL_MS = 10000L
 
-        fun start(context: Context) {
+        internal fun canAttemptForegroundStart(
+            sdkInt: Int,
+            fromForegroundUi: Boolean,
+            isAppInForeground: Boolean
+        ): Boolean {
+            if (sdkInt < Build.VERSION_CODES.S) return true
+            return fromForegroundUi || isAppInForeground
+        }
+
+        fun start(context: Context, fromForegroundUi: Boolean = false) {
+            LocalHttpServer.start()
+            NotificationRebindHelper.rebindService(context)
+
+            if (!canAttemptForegroundStart(
+                    sdkInt = Build.VERSION.SDK_INT,
+                    fromForegroundUi = fromForegroundUi,
+                    isAppInForeground = ClawdBridgeApplication.isForegroundUiActive
+                )
+            ) {
+                Log.i(TAG, "Background wake: running silently via NotificationListener & HTTP until UI foreground entry")
+                return
+            }
+
             try {
                 val intent = Intent(context, MediaBridgeForegroundService::class.java)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -176,8 +207,14 @@ class MediaBridgeForegroundService : Service() {
                 } else {
                     context.startService(intent)
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to start MediaBridgeForegroundService: ${e.message}", e)
+            } catch (t: Throwable) {
+                val isBlockedOnAndroid12Plus = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                    t.javaClass.name == "android.app.ForegroundServiceStartNotAllowedException"
+                if (isBlockedOnAndroid12Plus || t is IllegalStateException || t is SecurityException) {
+                    Log.i(TAG, "Deferred FGS start; continuing silently via NotificationListener & HTTP: ${t.message}")
+                } else {
+                    Log.w(TAG, "Unable to promote MediaBridgeForegroundService: ${t.message}")
+                }
             }
         }
 

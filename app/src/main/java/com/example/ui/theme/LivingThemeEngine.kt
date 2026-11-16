@@ -1,10 +1,8 @@
 package com.example.ui.theme
 
 import android.graphics.Bitmap
-import android.graphics.RuntimeShader
 import android.os.Build
 import android.os.SystemClock
-import androidx.annotation.RequiresApi
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
@@ -12,7 +10,9 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
@@ -23,26 +23,23 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.ShaderBrush
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.layer.CompositingStrategy as LayerCompositingStrategy
-import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.graphics.lerp
-import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -51,6 +48,8 @@ import com.example.media.ArtworkBlurHelper
 import com.example.media.SmartColorExtractor
 import com.example.model.NowPlayingData
 import com.example.state.BackgroundStyle
+import com.mikepenz.hypnoticcanvas.shaderBackground
+import com.mikepenz.hypnoticcanvas.shaders.MeshGradient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
@@ -58,7 +57,6 @@ import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.roundToInt
 import kotlin.math.sin
 
 /**
@@ -129,12 +127,12 @@ object ContrastGuard {
 
     fun normalizeAmbientCloudRgb(rgb: Int, targetMinL: Float = 0.35f, targetMaxL: Float = 0.55f): Int {
         val hsl = rgbToHsl(rgb)
-        if (hsl.s < 0.10f) {
-            return hslToRgb(218f, 0.06f, hsl.l.coerceIn(targetMinL, targetMaxL))
+        if (hsl.s < 0.08f) {
+            return hslToRgb(0f, 0f, hsl.l.coerceIn(targetMinL, targetMaxL))
         }
         val isWarmCream = hsl.h in 20f..55f && hsl.s < 0.34f && hsl.l > 0.65f
         if (isWarmCream) {
-            return hslToRgb(36f, 0.22f, 0.50f)
+            return hslToRgb(0f, 0f, 0.50f)
         }
         val s = hsl.s.coerceIn(0.48f, 0.86f)
         val l = hsl.l.coerceIn(targetMinL, targetMaxL)
@@ -193,7 +191,7 @@ fun rememberLivingPaletteState(
     liveState: NowPlayingData,
     artworkBitmap: Bitmap? = null,
     dynamicBackgroundEnabled: Boolean = true,
-    backgroundStyle: BackgroundStyle = BackgroundStyle.LIQUID_SILK,
+    backgroundStyle: BackgroundStyle = BackgroundStyle.MESH_SILK,
     suppressBackgroundMotion: Boolean = false
 ): LivingPaletteState {
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -213,7 +211,7 @@ fun rememberLivingPaletteState(
                 Color(0xFF10131A)
             )
         } else {
-            val fallbackRgb = 0xE4E4E7
+            val fallbackRgb = 0xE5E5E5
             val primaryRaw = ContrastGuard.parseHexRgb(liveState.accentColorHex, fallbackRgb)
             val dotRaws = liveState.accentColorsHex.map { ContrastGuard.parseHexRgb(it, primaryRaw) }
             val d0 = dotRaws.getOrElse(0) { primaryRaw }
@@ -313,7 +311,7 @@ fun rememberLivingPaletteState(
         for (i in 0 until 9) gridStates[i].value = targetGrid9[i]
     }
 
-    // 3. Compact 144x144 (or pre-blurred on API < 31) ImageBitmap for ultra-fast 60/120fps Apple Music blur
+    // 3. Compact 144x144 (or pre-blurred on API < 31) ImageBitmap strictly isolated inside Apple Music GPU blur
     val appleMusicCover by produceState<ImageBitmap?>(
         initialValue = null,
         key1 = artworkBitmap,
@@ -407,36 +405,36 @@ internal fun computeCloudPalette(
         )
     }
 
-    val primaryRaw = ContrastGuard.parseHexRgb(accentColorHex, 0xE4E4E7)
+    val primaryRaw = ContrastGuard.parseHexRgb(accentColorHex, 0xE5E5E5)
     val dotRaws = accentColorsHex.map { ContrastGuard.parseHexRgb(it, primaryRaw) }
     val raw0 = dotRaws.getOrElse(0) { primaryRaw }
     val raw1 = dotRaws.getOrElse(1) { raw0 }
     val raw2 = dotRaws.getOrElse(2) { raw1 }
 
     val hsls = listOf(raw0, raw1, raw2).map { ContrastGuard.rgbToHsl(it) }
-    val isMonochrome = hsls.all { it.s < 0.11f }
+    val isMonochrome = hsls.all { it.s < 0.08f }
 
     if (isMonochrome) {
         return listOf(
-            Color(0xFF5D6472),
-            Color(0xFF7C8494),
-            Color(0xFF49505E),
-            Color(0xFFD6DAE2)
+            Color(0xFF4A4A4A),
+            Color(0xFF737373),
+            Color(0xFF363636),
+            Color(0xFFD4D4D4)
         )
     }
 
     val hasLightAccent = hsls.any { it.l > 0.76f && it.s < 0.30f }
-    val c1 = ContrastGuard.normalizeAmbientCloudRgb(raw0, targetMinL = 0.38f, targetMaxL = 0.54f).toComposeColor()
-    val c2 = ContrastGuard.normalizeAmbientCloudRgb(raw1, targetMinL = 0.35f, targetMaxL = 0.52f).toComposeColor()
-    val c3 = ContrastGuard.normalizeAmbientCloudRgb(raw2, targetMinL = 0.36f, targetMaxL = 0.55f).toComposeColor()
+    val c1 = ContrastGuard.normalizeAmbientCloudRgb(raw0, targetMinL = 0.36f, targetMaxL = 0.52f).toComposeColor()
+    val c2 = ContrastGuard.normalizeAmbientCloudRgb(raw1, targetMinL = 0.32f, targetMaxL = 0.48f).toComposeColor()
+    val c3 = ContrastGuard.normalizeAmbientCloudRgb(raw2, targetMinL = 0.34f, targetMaxL = 0.54f).toComposeColor()
     val c4 = if (hasLightAccent) {
-        Color(0xFFD6DAE2)
+        Color(0xFFD4D4D4)
     } else {
         val h0 = ContrastGuard.rgbToHsl(raw0)
         ContrastGuard.hslToRgb(
-            h = (h0.h + 18f) % 360f,
-            s = h0.s.coerceIn(0.42f, 0.76f),
-            l = 0.28f
+            h = (h0.h + 6f) % 360f,
+            s = h0.s.coerceIn(0.42f, 0.78f),
+            l = 0.24f
         ).toComposeColor()
     }
 
@@ -461,9 +459,9 @@ internal fun computeExtendedSixPalette(
     }
 
     val sourceHex = extendedColorsHex.ifEmpty { accentColorsHex }
-    val primaryRaw = ContrastGuard.parseHexRgb(accentColorHex, 0xE4E4E7)
+    val primaryRaw = ContrastGuard.parseHexRgb(accentColorHex, 0xE5E5E5)
     val parsed = sourceHex.map { ContrastGuard.parseHexRgb(it, primaryRaw) }
-    val isMono = parsed.all { ContrastGuard.rgbToHsl(it).s < 0.11f }
+    val isMono = parsed.all { ContrastGuard.rgbToHsl(it).s < 0.08f }
 
     if (isMono) {
         return SmartColorExtractor.MONOCHROME_EXTENDED_RGB.map { it.toComposeColor() }
@@ -471,9 +469,9 @@ internal fun computeExtendedSixPalette(
 
     val normalized = parsed.take(6).mapIndexed { index, raw ->
         when (index) {
-            3 -> ContrastGuard.normalizeAmbientCloudRgb(raw, targetMinL = 0.22f, targetMaxL = 0.34f).toComposeColor()
-            4 -> ContrastGuard.normalizeAmbientCloudRgb(raw, targetMinL = 0.44f, targetMaxL = 0.62f).toComposeColor()
-            else -> ContrastGuard.normalizeAmbientCloudRgb(raw, targetMinL = 0.34f, targetMaxL = 0.56f).toComposeColor()
+            3 -> ContrastGuard.normalizeAmbientCloudRgb(raw, targetMinL = 0.20f, targetMaxL = 0.32f).toComposeColor()
+            4 -> ContrastGuard.normalizeAmbientCloudRgb(raw, targetMinL = 0.42f, targetMaxL = 0.58f).toComposeColor()
+            else -> ContrastGuard.normalizeAmbientCloudRgb(raw, targetMinL = 0.32f, targetMaxL = 0.54f).toComposeColor()
         }
     }.toMutableList()
 
@@ -492,33 +490,27 @@ internal fun computeGridNinePalette(
     extendedFallback: List<Color>
 ): List<Color> {
     if (!isTrackActive) {
-        val base = listOf(
+        return listOf(
             Color(0xFF0F4A41), Color(0xFF163557), Color(0xFF1E244E),
             Color(0xFF103849), Color(0xFF1A4B4E), Color(0xFF262A59),
             Color(0xFF0A1D29), Color(0xFF142740), Color(0xFF1B1A38)
         )
-        return base
     }
     if (gridColorsHex.size >= 9) {
         return gridColorsHex.take(9).map { hex ->
-            val raw = ContrastGuard.parseHexRgb(hex, 0x181B24)
-            ContrastGuard.normalizeAmbientCloudRgb(raw, targetMinL = 0.28f, targetMaxL = 0.54f).toComposeColor()
+            val raw = ContrastGuard.parseHexRgb(hex, 0x181818)
+            ContrastGuard.normalizeAmbientCloudRgb(raw, targetMinL = 0.26f, targetMaxL = 0.52f).toComposeColor()
         }
     }
     return List(9) { i -> extendedFallback[i % extendedFallback.size] }
 }
 
 /**
- * Unified 5-style living background engine.
- * Switch between:
- *  1) LIQUID_SILK (AGSL 2D Value Noise + Domain Warping over 6 colors + 35% #07080B valleys + dithering)
- *  2) APPLE_MUSIC (Dual blurred 144px artwork layers drifting in opposite phases + adaptive scrim)
- *  3) MESH_GRID_3X3 (9-zone spatial color mesh with smooth breathing control points)
- *  4) AURORA (7 overlapping orbs in Offscreen layer with BlendMode.Screen)
- *  5) PURE_BLACK (Pure OLED #000000 black)
- *
- * When dynamicBackgroundEnabled == false ("Статичный градиент"), colors remain visible & reactive
- * while animation time stays frozen at 0 GPU frame draw cost.
+ * Unified 4-style living background engine over obsidian base #060709:
+ *  1) MESH_SILK (HypnoticCanvas MeshGradient at 1/5 resolution + fallback)
+ *  2) APPLE_MUSIC (Dual blurred 144px artwork layers + ColorMatrix saturation 1.35x + adaptive scrim)
+ *  3) TONAL (Calm 2-3 tone atmospheric gradient built from cover hues)
+ *  4) PURE_BLACK (#060709 pure dark base)
  */
 @Composable
 fun LivingAuroraBackdrop(
@@ -530,124 +522,99 @@ fun LivingAuroraBackdrop(
             Box(
                 modifier = modifier
                     .fillMaxSize()
-                    .background(Color.Black)
+                    .background(Color(0xFF060709))
             )
         }
         BackgroundStyle.APPLE_MUSIC -> {
             AppleMusicCoverBackdrop(palette = palette, modifier = modifier)
         }
-        BackgroundStyle.MESH_GRID_3X3 -> {
-            Grid3x3MeshBackdrop(palette = palette, modifier = modifier)
+        BackgroundStyle.TONAL -> {
+            TonalAtmosphericBackdrop(palette = palette, modifier = modifier)
         }
-        BackgroundStyle.AURORA -> {
-            AuroraScreenOrbsBackdrop(palette = palette, modifier = modifier)
-        }
-        BackgroundStyle.LIQUID_SILK -> {
-            LiquidSilkNoiseBackdrop(palette = palette, modifier = modifier)
+        BackgroundStyle.MESH_SILK -> {
+            HypnoticMeshSilkBackdrop(palette = palette, modifier = modifier)
         }
     }
 }
 
-private const val SHADER_DOWNSAMPLE_WIDTH_PX = 220
-
 @Composable
-private fun LiquidSilkNoiseBackdrop(
+private fun HypnoticMeshSilkBackdrop(
     palette: LivingPaletteState,
     modifier: Modifier = Modifier
 ) {
-    val shaderHolder = remember {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            runCatching { RuntimeShader(LIQUID_SILK_AGSL) }.getOrNull()
-        } else null
+    val ext = palette.extendedColorStates
+    val c0 = ext[0].value
+    val c1 = ext[1].value
+    val c2 = ext[2].value
+    val c3 = ext[3].value
+    val c4 = ext[4].value
+    val intensity = if (palette.isTrackActive) 1.0f else 0.82f
+    val meshSpeed = if (palette.isDynamicBgEnabled) 0.42f else 0f
+
+    val darkShadow = remember(c3) { lerp(Color(0xFF060709), c3, 0.45f) }
+    val primaryGlow = remember(c0, intensity) { lerp(Color(0xFF060709), c0, 0.78f * intensity) }
+    val secondaryGlow = remember(c1, intensity) { lerp(Color(0xFF060709), c1, 0.72f * intensity) }
+    val highlightGlow = remember(c2, c4, intensity) {
+        lerp(Color(0xFF060709), lerp(c2, c4, 0.35f), 0.68f * intensity)
     }
-    val shaderBrush = remember(shaderHolder) {
-        shaderHolder?.let { ShaderBrush(it) }
-    }
-    val lowResLayer = rememberGraphicsLayer().apply {
-        compositingStrategy = LayerCompositingStrategy.Offscreen
-    }
 
-    Canvas(modifier = modifier.fillMaxSize()) {
-        drawRect(Color(0xFF07080B))
-        val w = size.width
-        val h = size.height
-        if (w <= 0f || h <= 0f) return@Canvas
-
-        val t = palette.bgTimeSecondsState.value
-        val colorStates = palette.extendedColorStates
-        val intensity = if (palette.isTrackActive) 1.0f else 0.78f
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            shaderHolder != null &&
-            shaderBrush != null
-        ) {
-            val rendered = runCatching {
-                val lowW = SHADER_DOWNSAMPLE_WIDTH_PX.coerceAtMost(w.roundToInt().coerceAtLeast(1))
-                val lowH = ((h / w) * lowW).roundToInt().coerceIn(64, 560)
-                shaderHolder.setFloatUniform("uResolution", lowW.toFloat(), lowH.toFloat())
-                shaderHolder.setFloatUniform("uTime", t)
-                shaderHolder.setFloatUniform("uIntensity", intensity)
-                for (i in 0 until 6) {
-                    val c = colorStates[i].value
-                    shaderHolder.setFloatUniform("uColor$i", c.red, c.green, c.blue)
-                }
-                lowResLayer.record(size = IntSize(lowW, lowH)) {
-                    drawRect(brush = shaderBrush)
-                }
-                withTransform({
-                    scale(
-                        scaleX = w / lowW.toFloat(),
-                        scaleY = h / lowH.toFloat(),
-                        pivot = Offset.Zero
-                    )
-                }) {
-                    drawLayer(lowResLayer)
-                }
-            }.isSuccess
-            if (rendered) return@Canvas
-        }
-
-        // Smooth Canvas fallback for API < 33 or unsupported shader hardware
-        drawSilkCanvasFallback(
-            t = t,
-            colorStates = colorStates,
-            intensity = intensity
+    val meshShader = remember(darkShadow, primaryGlow, secondaryGlow, highlightGlow) {
+        MeshGradient(
+            colors = arrayOf(
+                primaryGlow,
+                darkShadow,
+                secondaryGlow,
+                highlightGlow
+            ),
+            scale = 1.15f
         )
     }
-}
 
-private fun DrawScope.drawSilkCanvasFallback(
-    t: Float,
-    colorStates: List<State<Color>>,
-    intensity: Float
-) {
-    val w = size.width
-    val h = size.height
-    val baseRadius = max(w, h)
-    drawSoftCloud(
-        Offset(w * (0.24f + 0.22f * sin(t * 0.42f)), h * (0.20f + 0.18f * cos(t * 0.35f))),
-        baseRadius * 0.52f, colorStates[0].value, 0.42f * intensity, 1.15f, 0.88f
-    )
-    drawSoftCloud(
-        Offset(w * (0.76f - 0.24f * cos(t * 0.38f)), h * (0.34f + 0.22f * sin(t * 0.31f))),
-        baseRadius * 0.60f, colorStates[1].value, 0.38f * intensity, 1.15f, 0.88f
-    )
-    drawSoftCloud(
-        Offset(w * (0.38f + 0.26f * cos(t * 0.34f + 1.4f)), h * (0.68f - 0.20f * sin(t * 0.40f))),
-        baseRadius * 0.68f, colorStates[2].value, 0.34f * intensity, 1.15f, 0.88f
-    )
-    drawSoftCloud(
-        Offset(w * (0.72f - 0.22f * sin(t * 0.46f + 0.8f)), h * (0.78f - 0.18f * cos(t * 0.33f))),
-        baseRadius * 0.52f, colorStates[3].value, 0.28f * intensity, 1.15f, 0.88f
-    )
-    drawSoftCloud(
-        Offset(w * (0.50f + 0.18f * sin(t * 0.29f + 2.2f)), h * (0.48f + 0.20f * cos(t * 0.36f))),
-        baseRadius * 0.60f, colorStates[4].value, 0.26f * intensity, 1.15f, 0.88f
-    )
-    drawSoftCloud(
-        Offset(w * (0.18f + 0.16f * cos(t * 0.44f + 3.0f)), h * (0.46f - 0.16f * sin(t * 0.37f))),
-        baseRadius * 0.68f, colorStates[5].value, 0.24f * intensity, 1.15f, 0.88f
-    )
+    val veilBrush = remember {
+        Brush.verticalGradient(
+            colors = listOf(
+                Color(0x40060709),
+                Color(0x24060709),
+                Color(0x66060709)
+            )
+        )
+    }
+
+    BoxWithConstraints(
+        modifier = modifier
+            .fillMaxSize()
+            .background(Color(0xFF060709))
+    ) {
+        val lowW = (maxWidth * 0.2f).coerceAtLeast(72.dp)
+        val lowH = (maxHeight * 0.2f).coerceAtLeast(120.dp)
+
+        // Render MeshGradient on a 1/5 resolution surface scaled smoothly 5x on GPU for effortless 120 FPS
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .requiredSize(width = lowW, height = lowH)
+                .graphicsLayer {
+                    scaleX = 5.05f
+                    scaleY = 5.05f
+                    transformOrigin = TransformOrigin(0f, 0f)
+                }
+                .shaderBackground(
+                    shader = meshShader,
+                    speed = meshSpeed,
+                    fallback = {
+                        Brush.linearGradient(
+                            colors = listOf(primaryGlow, darkShadow, secondaryGlow, highlightGlow)
+                        )
+                    }
+                )
+        )
+
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(veilBrush)
+        )
+    }
 }
 
 @Composable
@@ -656,12 +623,15 @@ private fun AppleMusicCoverBackdrop(
     modifier: Modifier = Modifier
 ) {
     val cover = palette.appleMusicCoverBitmap
-    val scrimAlpha = if (palette.isBrightCover) 0.60f else 0.50f
+    val scrimAlpha = if (palette.isBrightCover) 0.58f else 0.46f
+    val saturatedFilter = remember {
+        ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(1.35f) })
+    }
 
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(Color(0xFF07080B))
+            .background(Color(0xFF060709))
     ) {
         if (cover != null) {
             val blurModifier = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -675,6 +645,7 @@ private fun AppleMusicCoverBackdrop(
                 bitmap = cover,
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
+                colorFilter = saturatedFilter,
                 modifier = Modifier
                     .fillMaxSize()
                     .graphicsLayer {
@@ -694,6 +665,7 @@ private fun AppleMusicCoverBackdrop(
                 bitmap = cover,
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
+                colorFilter = saturatedFilter,
                 modifier = Modifier
                     .fillMaxSize()
                     .alpha(0.55f)
@@ -713,7 +685,7 @@ private fun AppleMusicCoverBackdrop(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color(0xFF07080B).copy(alpha = scrimAlpha))
+                    .background(Color(0xFF060709).copy(alpha = scrimAlpha))
             )
         } else {
             // Seamless ambient cloud fallback when idle/without decoded cover
@@ -743,165 +715,46 @@ private fun AppleMusicCoverBackdrop(
 }
 
 @Composable
-private fun Grid3x3MeshBackdrop(
+private fun TonalAtmosphericBackdrop(
     palette: LivingPaletteState,
     modifier: Modifier = Modifier
 ) {
-    val shaderHolder = remember {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            runCatching { RuntimeShader(GRID_3X3_AGSL) }.getOrNull()
-        } else null
-    }
-    val shaderBrush = remember(shaderHolder) {
-        shaderHolder?.let { ShaderBrush(it) }
-    }
-    val lowResLayer = rememberGraphicsLayer().apply {
-        compositingStrategy = LayerCompositingStrategy.Offscreen
-    }
-    val overlayBrush = remember {
-        Brush.verticalGradient(
-            colors = listOf(
-                Color(0x5507080B),
-                Color(0x2207080B),
-                Color(0x6607080B)
-            )
-        )
-    }
-
     Canvas(modifier = modifier.fillMaxSize()) {
-        drawRect(Color(0xFF07080B))
+        drawRect(Color(0xFF060709))
         val w = size.width
         val h = size.height
         if (w <= 0f || h <= 0f) return@Canvas
 
         val t = palette.bgTimeSecondsState.value
-        val gridStates = palette.gridColorStates
-        val intensity = if (palette.isTrackActive) 1.0f else 0.80f
+        val clouds = palette.cloudColorStates
+        val intensity = if (palette.isTrackActive) 1.0f else 0.78f
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            shaderHolder != null &&
-            shaderBrush != null
-        ) {
-            val rendered = runCatching {
-                val lowW = SHADER_DOWNSAMPLE_WIDTH_PX.coerceAtMost(w.roundToInt().coerceAtLeast(1))
-                val lowH = ((h / w) * lowW).roundToInt().coerceIn(64, 560)
-                shaderHolder.setFloatUniform("uResolution", lowW.toFloat(), lowH.toFloat())
-                shaderHolder.setFloatUniform("uTime", t)
-                shaderHolder.setFloatUniform("uIntensity", intensity)
-                for (i in 0 until 9) {
-                    val c = gridStates[i].value
-                    shaderHolder.setFloatUniform("uG$i", c.red, c.green, c.blue)
-                }
-                lowResLayer.record(size = IntSize(lowW, lowH)) {
-                    drawRect(brush = shaderBrush)
-                }
-                withTransform({
-                    scale(
-                        scaleX = w / lowW.toFloat(),
-                        scaleY = h / lowH.toFloat(),
-                        pivot = Offset.Zero
-                    )
-                }) {
-                    drawLayer(lowResLayer)
-                }
-            }.isSuccess
-            if (rendered) return@Canvas
-        }
+        val topTone = lerp(Color(0xFF060709), clouds[0].value, 0.56f * intensity)
+        val midTone = lerp(Color(0xFF060709), clouds[1].value, 0.36f * intensity)
+        val lowAccent = lerp(Color(0xFF060709), clouds[2].value, 0.26f * intensity)
 
-        // Smooth 9-node radial mesh fallback (zero array allocations per frame)
-        for (gy in 0 until 3) {
-            val anchorY = when (gy) { 0 -> 0.16f; 1 -> 0.50f; else -> 0.84f }
-            for (gx in 0 until 3) {
-                val anchorX = when (gx) { 0 -> 0.16f; 1 -> 0.50f; else -> 0.84f }
-                val idx = gy * 3 + gx
-                val isCenter = gx == 1 && gy == 1
-                val swayX = if (isCenter) 0.14f * sin(t * 0.55f) else 0.08f * sin(t * 0.42f + idx * 0.9f)
-                val swayY = if (isCenter) 0.12f * cos(t * 0.48f) else 0.08f * cos(t * 0.39f + idx * 1.1f)
-                val center = Offset(
-                    x = w * (anchorX + swayX),
-                    y = h * (anchorY + swayY)
+        drawRect(
+            brush = Brush.verticalGradient(
+                colorStops = arrayOf(
+                    0.0f to topTone,
+                    0.46f to midTone,
+                    0.82f to lowAccent,
+                    1.0f to Color(0xFF060709)
                 )
-                drawSoftCloud(
-                    center = center,
-                    radius = max(w, h) * 0.46f,
-                    color = gridStates[idx].value,
-                    alpha = (if (isCenter) 0.52f else 0.40f) * intensity,
-                    scaleX = 1.08f,
-                    scaleY = 1.08f
-                )
-            }
-        }
-        drawRect(brush = overlayBrush)
-    }
-}
-
-private val AURORA_ORB_INDICES = intArrayOf(0, 1, 2, 4, 5, 0, 2)
-private val AURORA_ORB_SCALES = floatArrayOf(0.72f, 0.64f, 0.68f, 0.52f, 0.56f, 0.44f, 0.48f)
-private val AURORA_ORB_ALPHAS = floatArrayOf(0.46f, 0.42f, 0.38f, 0.32f, 0.34f, 0.28f, 0.26f)
-
-@Composable
-private fun AuroraScreenOrbsBackdrop(
-    palette: LivingPaletteState,
-    modifier: Modifier = Modifier
-) {
-    val veilBrush = remember {
-        Brush.verticalGradient(
-            listOf(
-                Color(0x5206070B),
-                Color(0x2806070B),
-                Color(0x6606070B)
             )
         )
-    }
-    Box(
-        modifier = modifier
-            .fillMaxSize()
-            .background(Color(0xFF06070B))
-    ) {
-        Canvas(
-            modifier = Modifier
-                .fillMaxSize()
-                .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)
-        ) {
-            val w = size.width
-            val h = size.height
-            if (w <= 0f || h <= 0f) return@Canvas
 
-            val t = palette.bgTimeSecondsState.value
-            val ext = palette.extendedColorStates
-            val intensity = if (palette.isTrackActive) 1.0f else 0.78f
-            val baseSpan = max(w, h)
-
-            for (i in 0 until 7) {
-                val speedA = 0.34f + i * 0.055f
-                val speedB = 0.29f + i * 0.048f
-                val phase = i * 1.15f
-                val cx = w * (0.5f + 0.36f * sin(t * speedA + phase))
-                val cy = h * (0.5f + 0.34f * cos(t * speedB + phase * 1.3f))
-                val radius = baseSpan * AURORA_ORB_SCALES[i]
-                val orbColor = ext[AURORA_ORB_INDICES[i]].value
-                val orbAlpha = AURORA_ORB_ALPHAS[i] * intensity
-                val center = Offset(cx, cy)
-                drawCircle(
-                    brush = Brush.radialGradient(
-                        0.0f to orbColor.copy(alpha = orbAlpha),
-                        0.48f to orbColor.copy(alpha = orbAlpha * 0.38f),
-                        1.0f to Color.Transparent,
-                        center = center,
-                        radius = radius
-                    ),
-                    radius = radius,
-                    center = center,
-                    blendMode = BlendMode.Screen
-                )
-            }
-        }
-
-        // Subtle shadow veil ensuring text & glass card contrast stay crisp under Screen blend
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(veilBrush)
+        // Subtle atmospheric bloom
+        drawSoftCloud(
+            center = Offset(
+                w * (0.5f + 0.14f * sin(t * 0.25f)),
+                h * (0.28f + 0.08f * cos(t * 0.21f))
+            ),
+            radius = max(w, h) * 0.65f,
+            color = clouds[0].value,
+            alpha = 0.26f * intensity,
+            scaleX = 1.25f,
+            scaleY = 0.90f
         )
     }
 }
@@ -934,116 +787,3 @@ private fun DrawScope.drawSoftCloud(
     }
 }
 
-// Fast trig Domain Warping AGSL without heavy fbm/hash loops & ZERO shader arguments
-private const val LIQUID_SILK_AGSL = """
-uniform float2 uResolution;
-uniform float uTime;
-uniform float uIntensity;
-uniform float3 uColor0;
-uniform float3 uColor1;
-uniform float3 uColor2;
-uniform float3 uColor3;
-uniform float3 uColor4;
-uniform float3 uColor5;
-
-half4 main(float2 fragCoord) {
-    float2 res = max(uResolution, float2(1.0, 1.0));
-    float2 uv = (fragCoord - 0.5 * res) / min(res.x, res.y);
-    float t = uTime * 0.24;
-
-    // 3-stage nested trigonometric domain warping (~10x faster than multi-octave vnoise/fbm)
-    float2 p = uv * 1.85;
-    float2 q = float2(
-        sin(p.x * 1.15 + p.y * 0.72 + t * 0.85) + 0.55 * cos(p.y * 1.45 - t * 0.55),
-        cos(p.y * 1.20 - p.x * 0.68 + t * 0.68) + 0.55 * sin(p.x * 1.38 + t * 0.48)
-    );
-    float2 r = float2(
-        sin((p.x + q.x * 0.85) * 1.42 - t * 0.42 + 1.3),
-        cos((p.y + q.y * 0.85) * 1.36 + t * 0.36 + 2.1)
-    );
-
-    float flow = sin((p.x + r.x) * 1.18 + (p.y - r.y) * 0.94 + t * 0.28) * 0.5 + 0.5;
-    float w0 = smoothstep(0.14, 0.84, sin(flow * 3.2 + r.x * 1.7 + q.y * 0.6) * 0.5 + 0.5);
-    float w1 = smoothstep(0.18, 0.82, cos(r.y * 2.4 - q.x * 1.1 - t * 0.65) * 0.5 + 0.5);
-    float w2 = smoothstep(0.24, 0.88, sin((uv.x - uv.y) * 2.3 + r.x * 1.3 + t * 0.38) * 0.5 + 0.5);
-    float w3 = smoothstep(0.28, 0.90, cos((uv.x + uv.y) * 2.1 - q.y * 1.2 + t * 0.30) * 0.5 + 0.5);
-
-    float3 col = mix(uColor0, uColor1, w0);
-    col = mix(col, uColor2, w1 * 0.76);
-    col = mix(col, uColor4, w2 * 0.62);
-    col = mix(col, uColor5, (w3 * w3) * 0.52);
-    col = mix(uColor3, col, smoothstep(0.10, 0.68, flow));
-
-    // ~35% deep obsidian shadow valleys (#07080B) so contrast & depth stay dramatic
-    float3 shadowBase = float3(0.027, 0.031, 0.043);
-    float valley = smoothstep(0.18, 0.72, flow * 0.68 + (q.y * 0.25 + 0.25) * 0.32);
-    float vignette = smoothstep(1.40, 0.12, length(uv));
-    float glowMask = clamp(valley * (0.58 + 0.42 * vignette) * uIntensity, 0.0, 0.76);
-    float3 finalRgb = mix(shadowBase, col, glowMask);
-
-    // Subtle procedural screen-space dither to eliminate 8-bit banding
-    float dither = (fract(sin(dot(fragCoord, float2(12.9898, 78.233))) * 43758.5453) - 0.5) * 0.010;
-    finalRgb = clamp(finalRgb + dither, 0.0, 1.0);
-    return half4(finalRgb, 1.0);
-}
-"""
-
-private const val GRID_3X3_AGSL = """
-uniform float2 uResolution;
-uniform float uTime;
-uniform float uIntensity;
-uniform float3 uG0;
-uniform float3 uG1;
-uniform float3 uG2;
-uniform float3 uG3;
-uniform float3 uG4;
-uniform float3 uG5;
-uniform float3 uG6;
-uniform float3 uG7;
-uniform float3 uG8;
-
-float hash21(float2 p) {
-    p = fract(p * float2(123.34, 456.21));
-    p += dot(p, p + 45.32);
-    return fract(p.x * p.y);
-}
-
-half4 main(float2 fragCoord) {
-    float2 res = max(uResolution, float2(1.0, 1.0));
-    float2 uv = clamp(fragCoord / res, 0.0, 1.0);
-    float t = uTime * 0.45;
-
-    // Gentle sinusoidal breathing on interior control coordinates
-    float2 warp = float2(
-        sin(uv.y * 3.14159 + t) * 0.11 * sin(uv.x * 3.14159),
-        cos(uv.x * 3.14159 - t * 0.82) * 0.11 * sin(uv.y * 3.14159)
-    );
-    float2 p = clamp(uv + warp, 0.0, 1.0) * 2.0;
-
-    // Smooth hermite weights along 3x3 cell lattice [0..2]
-    float tx = clamp(p.x, 0.0, 1.0);
-    float sx = smoothstep(0.0, 1.0, tx);
-    float tx2 = clamp(p.x - 1.0, 0.0, 1.0);
-    float sx2 = smoothstep(0.0, 1.0, tx2);
-
-    float ty = clamp(p.y, 0.0, 1.0);
-    float sy = smoothstep(0.0, 1.0, ty);
-    float ty2 = clamp(p.y - 1.0, 0.0, 1.0);
-    float sy2 = smoothstep(0.0, 1.0, ty2);
-
-    float3 row0 = (p.x < 1.0) ? mix(uG0, uG1, sx) : mix(uG1, uG2, sx2);
-    float3 row1 = (p.x < 1.0) ? mix(uG3, uG4, sx) : mix(uG4, uG5, sx2);
-    float3 row2 = (p.x < 1.0) ? mix(uG6, uG7, sx) : mix(uG7, uG8, sx2);
-
-    float3 gridCol = (p.y < 1.0) ? mix(row0, row1, sy) : mix(row1, row2, sy2);
-
-    float3 baseDark = float3(0.027, 0.031, 0.043);
-    float distCenter = length(uv - float2(0.5, 0.46));
-    float mask = clamp((0.86 - distCenter * 0.46) * uIntensity, 0.0, 0.80);
-    float3 finalRgb = mix(baseDark, gridCol, mask);
-
-    float dither = (hash21(fragCoord) - 0.5) * 0.01;
-    finalRgb = clamp(finalRgb + dither, 0.0, 1.0);
-    return half4(finalRgb, 1.0);
-}
-"""

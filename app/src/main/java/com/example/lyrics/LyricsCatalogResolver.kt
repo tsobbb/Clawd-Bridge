@@ -27,6 +27,12 @@ data class LyricsInterlude(
     val endMs: Long
 )
 
+enum class LyricsSyncMode {
+    WORD_SYNCED,
+    LINE_SYNCED,
+    UNSYNCED
+}
+
 data class LyricsResult(
     val found: Boolean,
     val source: String,
@@ -37,6 +43,13 @@ data class LyricsResult(
     val plainLyrics: String,
     val lines: List<LyricsLine>
 ) {
+    val syncMode: LyricsSyncMode
+        get() = when {
+            lines.any { it.words.isNotEmpty() } -> LyricsSyncMode.WORD_SYNCED
+            lines.isNotEmpty() -> LyricsSyncMode.LINE_SYNCED
+            else -> LyricsSyncMode.UNSYNCED
+        }
+
     fun toJsonString(): String {
         val linesJson = lines.joinToString(separator = ",", prefix = "[", postfix = "]") { line ->
             """{"time_ms":${line.timeMs},"text":"${escapeJson(line.text)}"}"""
@@ -491,8 +504,10 @@ object LyricsCatalogResolver {
         val lineTagRegex = Regex("""\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?]""")
         val wordTagRegex = Regex("""<(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?>""")
         val result = mutableListOf<LyricsLine>()
+        val sanitizedText = lrcText.removePrefix("\uFEFF").replace("\r\n", "\n")
 
-        lrcText.lineSequence().forEach { rawLine ->
+        sanitizedText.lineSequence().forEach { rawLineRaw ->
+            val rawLine = rawLineRaw.removePrefix("\uFEFF")
             val tags = lineTagRegex.findAll(rawLine).toList()
             if (tags.isEmpty()) return@forEach
             val bodyWithWordTags = lineTagRegex.replace(rawLine, "").trim()

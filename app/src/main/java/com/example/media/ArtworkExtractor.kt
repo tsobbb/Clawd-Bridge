@@ -33,7 +33,13 @@ data class ExtractedArtwork(
     val accentColorInts: List<Int>,
     val accentColorsHex: List<String>,
     val extendedColorsHex: List<String> = accentColorsHex,
-    val gridColorsHex: List<String> = emptyList()
+    val gridColorsHex: List<String> = emptyList(),
+    val widthPx: Int = thumbnail.width,
+    val heightPx: Int = thumbnail.height,
+    val sourceWidthPx: Int = thumbnail.width,
+    val sourceHeightPx: Int = thumbnail.height,
+    val isHd: Boolean = minOf(thumbnail.width, thumbnail.height) >= 480,
+    val needsHdUpgrade: Boolean = minOf(thumbnail.width, thumbnail.height) < 320
 )
 
 data class NotificationArtProbe(
@@ -49,14 +55,21 @@ data class UriArtLoadResult(
 
 object ArtworkExtractor {
 
-    private const val ARTWORK_SIZE_PX = 160
-    private const val MAX_DECODE_DIMENSION = 512
+    private const val ARTWORK_SIZE_PX = 512
+    private const val ARTWORK_MAX_OUTPUT_PX = 768
+    const val HD_UPGRADE_THRESHOLD_PX = 320
+    const val HD_QUALITY_MIN_PX = 480
+    private const val MAX_DECODE_DIMENSION = 1024
     private const val MAX_REMOTE_IMAGE_BYTES = 5 * 1024 * 1024
-    private const val JPEG_QUALITY = 84
+    private const val JPEG_QUALITY = 90
     const val BROWSER_USER_AGENT =
         "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
     private const val DEFAULT_ACCENT_INT = 0xFF00E5FF.toInt()
     private val DEFAULT_PALETTE_INTS = listOf(0xFF00E5FF.toInt(), 0xFF3B82F6.toInt(), 0xFF7C3AED.toInt())
+
+    internal fun computeTargetArtworkSidePx(sourceMinSide: Int): Int {
+        return sourceMinSide.coerceIn(1, ARTWORK_MAX_OUTPUT_PX)
+    }
 
     /**
      * Synchronously extracts artwork from inline MediaMetadata bitmaps.
@@ -461,7 +474,11 @@ object ArtworkExtractor {
             return null
         }
 
-        val thumbnail = createSquareThumbnail(rawBitmap, ARTWORK_SIZE_PX)
+        val srcW = rawBitmap.width
+        val srcH = rawBitmap.height
+        val srcMinSide = min(srcW, srcH)
+        val targetSide = computeTargetArtworkSidePx(srcMinSide)
+        val thumbnail = createSquareThumbnail(rawBitmap, targetSide)
         val jpegBytes = compressToJpeg(thumbnail)
         val pixels32 = ArtworkBlurHelper.extractPixels32(thumbnail)
         val smart = SmartColorExtractor.extractFromPixels(pixels32, 32, 32)
@@ -471,6 +488,7 @@ object ArtworkExtractor {
         val extendedHex = smart.paletteExtendedRgb.map { toHexString(0xFF000000.toInt() or it) }
         val gridHex = smart.spatialGrid3x3Rgb.map { toHexString(0xFF000000.toInt() or it) }
         val primaryHex = toHexString(primaryInt)
+        val outMinSide = min(thumbnail.width, thumbnail.height)
 
         return ExtractedArtwork(
             thumbnail = thumbnail,
@@ -480,7 +498,13 @@ object ArtworkExtractor {
             accentColorInts = paletteInts,
             accentColorsHex = paletteHex,
             extendedColorsHex = extendedHex,
-            gridColorsHex = gridHex
+            gridColorsHex = gridHex,
+            widthPx = thumbnail.width,
+            heightPx = thumbnail.height,
+            sourceWidthPx = srcW,
+            sourceHeightPx = srcH,
+            isHd = outMinSide >= HD_QUALITY_MIN_PX,
+            needsHdUpgrade = outMinSide < HD_UPGRADE_THRESHOLD_PX
         )
     }
 

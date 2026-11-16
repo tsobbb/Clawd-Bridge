@@ -18,7 +18,7 @@ class PackageUpdatedReceiver : BroadcastReceiver() {
         Log.i(TAG, "MY_PACKAGE_REPLACED received — restarting bridge service and rebinding listener")
         BridgeAppUpdater.onPackageReplaced(context)
         LocalHttpServer.start()
-        MediaBridgeForegroundService.start(context)
+        MediaBridgeForegroundService.start(context, fromForegroundUi = false)
         NotificationRebindHelper.rebindService(context)
     }
 

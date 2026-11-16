@@ -33,15 +33,20 @@ import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
 enum class BackgroundStyle(val id: String, val label: String) {
-    LIQUID_SILK("liquid_silk", "Жидкий шёлк"),
+    MESH_SILK("mesh_silk", "Mesh Шёлк"),
     APPLE_MUSIC("apple_music", "Apple Music"),
-    MESH_GRID_3X3("mesh_grid_3x3", "Сетка 3×3"),
-    AURORA("aurora", "Аврора"),
+    TONAL("tonal", "Тональный"),
     PURE_BLACK("pure_black", "Чистый чёрный");
 
     companion object {
         fun fromId(id: String?): BackgroundStyle {
-            return entries.firstOrNull { it.id == id } ?: LIQUID_SILK
+            return when (id) {
+                "mesh_silk", "liquid_silk", "mesh_grid_3x3" -> MESH_SILK
+                "apple_music" -> APPLE_MUSIC
+                "tonal", "aurora" -> TONAL
+                "pure_black" -> PURE_BLACK
+                else -> MESH_SILK
+            }
         }
     }
 }
@@ -180,6 +185,26 @@ object MediaBridgeStateHolder {
     @Volatile
     private var catalogFallbackAttemptedKey: String = ""
 
+    @Volatile
+    private var hdUpgradeAttemptedKey: String = ""
+
+    @Volatile
+    private var inFlightHdUpgradeKey: String = ""
+
+    @Volatile
+    private var hdUpgradedTrackKey: String = ""
+
+    private const val SEEK_GRACE_WINDOW_MS = 650L
+
+    @Volatile
+    private var seekGraceUntilElapsedMs: Long = 0L
+
+    @Volatile
+    private var seekGraceTargetPosMs: Long = 0L
+
+    @Volatile
+    private var seekGraceTrackIdentity: String = ""
+
     private val notificationArtMap = ConcurrentHashMap<String, NotificationArtEntry>()
     private val notificationArtRevision = AtomicLong(0L)
 
@@ -215,7 +240,7 @@ object MediaBridgeStateHolder {
     private val _dynamicBackgroundEnabled = MutableStateFlow(true)
     val dynamicBackgroundEnabled: StateFlow<Boolean> = _dynamicBackgroundEnabled.asStateFlow()
 
-    private val _backgroundStyle = MutableStateFlow(BackgroundStyle.LIQUID_SILK)
+    private val _backgroundStyle = MutableStateFlow(BackgroundStyle.MESH_SILK)
     val backgroundStyle: StateFlow<BackgroundStyle> = _backgroundStyle.asStateFlow()
 
     private val _playerStyleConfig = MutableStateFlow(PlayerStyleConfig())
@@ -362,8 +387,40 @@ object MediaBridgeStateHolder {
         runCatching { controller.transportControls.skipToPrevious() }
     }
 
+    internal fun resolveGraceAdjustedPositionMs(
+        calculatedPosMs: Long,
+        nowElapsedMs: Long,
+        graceUntilElapsedMs: Long,
+        graceTargetPosMs: Long,
+        durationMs: Long,
+        isPlaying: Boolean,
+        playbackSpeed: Float = 1.0f
+    ): Long {
+        if (nowElapsedMs < graceUntilElapsedMs) {
+            val startElapsedMs = graceUntilElapsedMs - SEEK_GRACE_WINDOW_MS
+            val dtMs = if (isPlaying) {
+                ((nowElapsedMs - startElapsedMs).coerceAtLeast(0L) * playbackSpeed.coerceAtLeast(0.25f)).toLong()
+            } else {
+                0L
+            }
+            val projected = graceTargetPosMs + dtMs
+            return if (durationMs > 0L) projected.coerceIn(0L, durationMs) else projected.coerceAtLeast(0L)
+        }
+        return calculatedPosMs
+    }
+
+    internal fun formatArtworkDebugStatus(widthPx: Int, heightPx: Int, note: String): String {
+        val quality = if (minOf(widthPx, heightPx) >= ArtworkExtractor.HD_QUALITY_MIN_PX) "HD" else "SD"
+        return "Готова • ${widthPx}×${heightPx} • $quality ($note)"
+    }
+
     fun seekToPosition(positionMs: Long) {
         val clamped = positionMs.coerceAtLeast(0L)
+        val snap = _playerUiState.value
+        seekGraceTargetPosMs = clamped
+        seekGraceUntilElapsedMs = SystemClock.elapsedRealtime() + SEEK_GRACE_WINDOW_MS
+        seekGraceTrackIdentity = "${snap.player}|${snap.artist}|${snap.title}"
+
         if (TestMediaSimulator.isSimulatorActive.value) {
             TestMediaSimulator.seekTo(clamped)
             return
@@ -383,7 +440,21 @@ object MediaBridgeStateHolder {
         } else {
             val ctrl = activeController.get()
             val st = ctrl?.playbackState
-            if (st != null) calculatePosition(st, snap.durationMs).first else snap.positionMs
+            val trackIdentity = "${snap.player}|${snap.artist}|${snap.title}"
+            if (st != null) {
+                val (calcPos, _) = calculatePosition(st, snap.durationMs)
+                if (trackIdentity == seekGraceTrackIdentity) {
+                    resolveGraceAdjustedPositionMs(
+                        calculatedPosMs = calcPos,
+                        nowElapsedMs = SystemClock.elapsedRealtime(),
+                        graceUntilElapsedMs = seekGraceUntilElapsedMs,
+                        graceTargetPosMs = seekGraceTargetPosMs,
+                        durationMs = snap.durationMs,
+                        isPlaying = snap.isPlaying,
+                        playbackSpeed = snap.playbackSpeed
+                    )
+                } else calcPos
+            } else snap.positionMs
         }
         val target = if (snap.durationMs > 0L) {
             (currentRaw + deltaMs).coerceIn(0L, snap.durationMs)
@@ -605,11 +676,6 @@ object MediaBridgeStateHolder {
             val metadata = controller.metadata
             val duration = (metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L).coerceAtLeast(0L)
 
-            val (rawPosMs, positionKnown) = calculatePosition(state, duration)
-            val posMs = if (positionKnown) applyOffset(rawPosMs, duration, _syncOffsetMs.value) else 0L
-            val posSec = posMs / 1000.0
-            val speed = if (state.playbackSpeed > 0f) state.playbackSpeed else 1.0f
-
             val title = metadata?.getString(MediaMetadata.METADATA_KEY_TITLE)
                 ?: metadata?.getString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE)
                 ?: ""
@@ -618,6 +684,28 @@ object MediaBridgeStateHolder {
                 ?: ""
             val album = metadata?.getString(MediaMetadata.METADATA_KEY_ALBUM) ?: ""
             val packageName = controller.packageName ?: "unknown"
+            val speed = if (state.playbackSpeed > 0f) state.playbackSpeed else 1.0f
+
+            val (calcPosMs, calcKnown) = calculatePosition(state, duration)
+            val trackIdentity = "$packageName|$artist|$title"
+            val nowElapsed = SystemClock.elapsedRealtime()
+            val inSeekGrace = trackIdentity == seekGraceTrackIdentity && nowElapsed < seekGraceUntilElapsedMs
+            val rawPosMs = if (inSeekGrace) {
+                resolveGraceAdjustedPositionMs(
+                    calculatedPosMs = calcPosMs,
+                    nowElapsedMs = nowElapsed,
+                    graceUntilElapsedMs = seekGraceUntilElapsedMs,
+                    graceTargetPosMs = seekGraceTargetPosMs,
+                    durationMs = duration,
+                    isPlaying = isPlaying,
+                    playbackSpeed = speed
+                )
+            } else {
+                calcPosMs
+            }
+            val positionKnown = calcKnown || inSeekGrace
+            val posMs = if (positionKnown) applyOffset(rawPosMs, duration, _syncOffsetMs.value) else 0L
+            val posSec = posMs / 1000.0
 
             val extractedArt = resolveArtwork(packageName, artist, title, album, metadata)
             val fallbackPalette = if (extractedArt == null) {
@@ -675,7 +763,7 @@ object MediaBridgeStateHolder {
             val existing = cachedExtractedArtwork
             if (cachedTrackKey == key && existing != null) {
                 _artworkBitmap.value = existing.thumbnail
-                _artworkDebugStatus.value = "Готова • ${existing.thumbnail.width}×${existing.thumbnail.height} (Симулятор)"
+                _artworkDebugStatus.value = formatArtworkDebugStatus(existing.widthPx, existing.heightPx, "Симулятор")
                 return existing
             }
             val created = ArtworkExtractor.createSimulatorArtwork(
@@ -688,7 +776,7 @@ object MediaBridgeStateHolder {
             cachedExtractedArtwork = created
             currentArtworkBytes = created.jpegBytes
             _artworkBitmap.value = created.thumbnail
-            _artworkDebugStatus.value = "Готова • ${created.thumbnail.width}×${created.thumbnail.height} (Симулятор)"
+            _artworkDebugStatus.value = formatArtworkDebugStatus(created.widthPx, created.heightPx, "Симулятор")
             return created
         }
     }
@@ -728,11 +816,17 @@ object MediaBridgeStateHolder {
                 cachedTrackKey = trackKey
                 cachedArtworkSourceKey = ""
                 cachedExtractedArtwork = trackArtworkCache[trackKey]
+                hdUpgradeAttemptedKey = ""
+                inFlightHdUpgradeKey = ""
+                hdUpgradedTrackKey = if (cachedExtractedArtwork?.isHd == true) trackKey else ""
                 if (cachedExtractedArtwork != null) {
-                    val bmp = cachedExtractedArtwork!!.thumbnail
-                    currentArtworkBytes = cachedExtractedArtwork!!.jpegBytes
-                    _artworkBitmap.value = bmp
-                    _artworkDebugStatus.value = "Готова • ${bmp.width}×${bmp.height} (Кэш)"
+                    val art = cachedExtractedArtwork!!
+                    currentArtworkBytes = art.jpegBytes
+                    _artworkBitmap.value = art.thumbnail
+                    _artworkDebugStatus.value = formatArtworkDebugStatus(art.widthPx, art.heightPx, "Кэш")
+                    if (art.needsHdUpgrade && (artist.isNotBlank() || title.isNotBlank())) {
+                        triggerHdUpgradeIfNeededLocked(packageName, trackKey, sourceKey, artist, title, album)
+                    }
                 } else {
                     currentArtworkBytes = null
                     _artworkBitmap.value = null
@@ -740,11 +834,16 @@ object MediaBridgeStateHolder {
                 lastAttemptedUriKey = ""
                 inFlightArtKey = ""
                 catalogFallbackAttemptedKey = ""
-            } else if (cachedExtractedArtwork != null && (cachedArtworkSourceKey == sourceKey || (inlineBitmap == null && !notifEntryUsable))) {
-                val bmp = cachedExtractedArtwork!!.thumbnail
-                if (_artworkBitmap.value == null) _artworkBitmap.value = bmp
+            } else if (cachedExtractedArtwork != null &&
+                (hdUpgradedTrackKey == trackKey || cachedArtworkSourceKey == sourceKey || (inlineBitmap == null && !notifEntryUsable))
+            ) {
+                val art = cachedExtractedArtwork!!
+                if (_artworkBitmap.value == null) _artworkBitmap.value = art.thumbnail
                 if (_artworkDebugStatus.value == "Ожидание трека") {
-                    _artworkDebugStatus.value = "Готова • ${bmp.width}×${bmp.height}"
+                    _artworkDebugStatus.value = formatArtworkDebugStatus(art.widthPx, art.heightPx, "Кэш")
+                }
+                if (art.needsHdUpgrade && hdUpgradeAttemptedKey != trackKey && (artist.isNotBlank() || title.isNotBlank())) {
+                    triggerHdUpgradeIfNeededLocked(packageName, trackKey, sourceKey, artist, title, album)
                 }
                 return cachedExtractedArtwork
             }
@@ -754,6 +853,9 @@ object MediaBridgeStateHolder {
                 val extracted = ArtworkExtractor.fromBitmap(inlineBitmap)
                 if (extracted != null) {
                     applyResolvedArtworkLocked(trackKey, sourceKey, extracted, "MediaMetadata Bitmap")
+                    if (extracted.needsHdUpgrade && (artist.isNotBlank() || title.isNotBlank())) {
+                        triggerHdUpgradeIfNeededLocked(packageName, trackKey, sourceKey, artist, title, album)
+                    }
                     return extracted
                 }
             }
@@ -763,14 +865,17 @@ object MediaBridgeStateHolder {
                 val extracted = ArtworkExtractor.fromBitmap(validNotifBmp)
                 if (extracted != null) {
                     applyResolvedArtworkLocked(trackKey, sourceKey, extracted, notifEntry!!.debugNote)
+                    if (extracted.needsHdUpgrade && (artist.isNotBlank() || title.isNotBlank())) {
+                        triggerHdUpgradeIfNeededLocked(packageName, trackKey, sourceKey, artist, title, album)
+                    }
                     return extracted
                 }
             }
 
             // Return LRU cached cover immediately if already fetched
             if (cachedExtractedArtwork != null) {
-                val bmp = cachedExtractedArtwork!!.thumbnail
-                _artworkDebugStatus.value = "Готова • ${bmp.width}×${bmp.height} (Кэш)"
+                val art = cachedExtractedArtwork!!
+                _artworkDebugStatus.value = formatArtworkDebugStatus(art.widthPx, art.heightPx, "Кэш")
                 return cachedExtractedArtwork
             }
 
@@ -824,6 +929,46 @@ object MediaBridgeStateHolder {
         }
     }
 
+    private fun triggerHdUpgradeIfNeededLocked(
+        packageName: String,
+        trackKey: String,
+        sourceKey: String,
+        artist: String,
+        title: String,
+        album: String
+    ) {
+        if (hdUpgradeAttemptedKey == trackKey || inFlightHdUpgradeKey == trackKey || hdUpgradedTrackKey == trackKey) {
+            return
+        }
+        hdUpgradeAttemptedKey = trackKey
+        inFlightHdUpgradeKey = trackKey
+        val preferSc = packageName.lowercase(Locale.US).contains("soundcloud")
+        ioScope.launch {
+            val hdRes = ArtworkCatalogResolver.resolveHdUpgrade(
+                rawArtist = artist,
+                rawTitle = title,
+                rawAlbum = album,
+                preferSoundCloudFirst = preferSc
+            )
+            var shouldRefresh = false
+            synchronized(artworkLock) {
+                if (inFlightHdUpgradeKey == trackKey) {
+                    inFlightHdUpgradeKey = ""
+                }
+                val hdArt = hdRes?.artwork
+                if (cachedTrackKey == trackKey && hdArt != null) {
+                    hdUpgradedTrackKey = trackKey
+                    // Preserve original player sourceKey so 250ms ticks do not overwrite HD back to tiny inline bitmap
+                    applyResolvedArtworkLocked(trackKey, sourceKey, hdArt, "HD-апгрейд • ${hdRes.debugNote}")
+                    shouldRefresh = true
+                }
+            }
+            if (shouldRefresh) {
+                refreshSnapshot(forcePush = true)
+            }
+        }
+    }
+
     private fun applyResolvedArtworkLocked(
         trackKey: String,
         sourceKey: String,
@@ -836,7 +981,7 @@ object MediaBridgeStateHolder {
         trackArtworkCache[trackKey] = extracted
         currentArtworkBytes = extracted.jpegBytes
         _artworkBitmap.value = extracted.thumbnail
-        _artworkDebugStatus.value = "Готова • ${extracted.thumbnail.width}×${extracted.thumbnail.height} ($debugNote)"
+        _artworkDebugStatus.value = formatArtworkDebugStatus(extracted.widthPx, extracted.heightPx, debugNote)
     }
 
     private fun fetchArtworkWithWaterfallAsync(
@@ -882,6 +1027,9 @@ object MediaBridgeStateHolder {
                 if (cachedTrackKey == trackKey) {
                     if (finalArtwork != null) {
                         applyResolvedArtworkLocked(trackKey, sourceKey, finalArtwork, finalNote)
+                        if (finalArtwork.needsHdUpgrade && (artist.isNotBlank() || title.isNotBlank())) {
+                            triggerHdUpgradeIfNeededLocked(packageName, trackKey, sourceKey, artist, title, album)
+                        }
                         shouldRefresh = true
                     } else {
                         _artworkDebugStatus.value = finalNote
@@ -923,6 +1071,9 @@ object MediaBridgeStateHolder {
                     val art = catalogRes.artwork
                     if (art != null) {
                         applyResolvedArtworkLocked(trackKey, sourceKey, art, "${catalogRes.debugNote} ($metaSummary; $notifSummary)")
+                        if (art.needsHdUpgrade && (artist.isNotBlank() || title.isNotBlank())) {
+                            triggerHdUpgradeIfNeededLocked(packageName, trackKey, sourceKey, artist, title, album)
+                        }
                         shouldRefresh = true
                     } else {
                         _artworkDebugStatus.value = "Генеративная палитра (${catalogRes.debugNote}; $metaSummary; $notifSummary)"
@@ -944,6 +1095,9 @@ object MediaBridgeStateHolder {
                 lastAttemptedUriKey = ""
                 inFlightArtKey = ""
                 catalogFallbackAttemptedKey = ""
+                hdUpgradeAttemptedKey = ""
+                inFlightHdUpgradeKey = ""
+                hdUpgradedTrackKey = ""
                 currentArtworkBytes = null
                 _artworkBitmap.value = null
                 _artworkDebugStatus.value = "Ожидание трека"

@@ -17,6 +17,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -143,7 +145,7 @@ class MainActivity : ComponentActivity() {
         AppFilterManager.init(this)
         MediaBridgeStateHolder.init(this)
         LocalHttpServer.start()
-        MediaBridgeForegroundService.start(this)
+        MediaBridgeForegroundService.start(this, fromForegroundUi = true)
         NotificationRebindHelper.rebindService(this)
         handleIncomingIntent(intent)
 
@@ -249,7 +251,7 @@ fun ClawdBridgeMainApp(openUpdateSheetTrigger: Int = 0) {
         ActivityResultContracts.RequestPermission()
     ) { isGranted ->
         if (isGranted) {
-            MediaBridgeForegroundService.start(context)
+            MediaBridgeForegroundService.start(context, fromForegroundUi = true)
         }
     }
 
@@ -270,7 +272,7 @@ fun ClawdBridgeMainApp(openUpdateSheetTrigger: Int = 0) {
             if (event == Lifecycle.Event.ON_RESUME) {
                 isNotificationAccessGranted = NotificationRebindHelper.isNotificationAccessGranted(context)
                 isBatteryOptIgnored = checkBatteryOptIgnored(context)
-                MediaBridgeForegroundService.start(context)
+                MediaBridgeForegroundService.start(context, fromForegroundUi = true)
                 NotificationRebindHelper.rebindService(context)
                 MediaBridgeStateHolder.refreshSnapshot()
                 BridgeAppUpdater.retryInstallIfPermitted(context)
@@ -300,18 +302,34 @@ fun ClawdBridgeMainApp(openUpdateSheetTrigger: Int = 0) {
 
     val forceRebindAction = {
         NotificationRebindHelper.forceRebindService(context)
-        MediaBridgeForegroundService.start(context)
+        MediaBridgeForegroundService.start(context, fromForegroundUi = true)
         Toast.makeText(context, "Служба переподключена", Toast.LENGTH_SHORT).show()
     }
 
+    val playerProgress by animateFloatAsState(
+        targetValue = if (isFullscreenPlayerOpen && playerUiState.hasMedia) 1f else 0f,
+        animationSpec = tween(240),
+        label = "root_player_progress"
+    )
+
     Box(modifier = Modifier.fillMaxSize()) {
+        // Layer 1: Lowest base dark canvas (#060709) — sits UNDER LivingAuroraBackdrop
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0xFF060709))
+        )
+
+        // Layer 2: Dynamic Ambient Backdrop (shared across Home & GRADIENT Fullscreen Player)
         if (!hideRootBackdrop) {
             LivingAuroraBackdrop(palette = livingPalette)
         }
 
+        // Layer 3: Main Scaffold fades smoothly out as FullscreenPlayer opens so nothing bleeds through
         Scaffold(
             modifier = Modifier
                 .fillMaxSize()
+                .graphicsLayer { alpha = (1f - playerProgress).coerceIn(0f, 1f) }
                 .testTag("main_scaffold"),
             containerColor = Color.Transparent,
             contentWindowInsets = WindowInsets(0, 0, 0, 0),
@@ -327,7 +345,7 @@ fun ClawdBridgeMainApp(openUpdateSheetTrigger: Int = 0) {
                     },
                     onRestartServer = {
                         LocalHttpServer.start()
-                        MediaBridgeForegroundService.start(context)
+                        MediaBridgeForegroundService.start(context, fromForegroundUi = true)
                         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                         Toast.makeText(context, "Сервер перезапущен", Toast.LENGTH_SHORT).show()
                     }

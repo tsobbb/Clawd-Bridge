@@ -29,9 +29,9 @@ object SmartColorExtractor {
         val spatialGrid3x3Rgb: List<Int> = List(9) { 0x18181B }
     )
 
-    val MONOCHROME_DOTS_RGB = listOf(0x52525B, 0xA1A1AA, 0xF4F4F5)
-    val MONOCHROME_EXTENDED_RGB = listOf(0x1E2026, 0x3B404B, 0x5A6170, 0x868E9E, 0xBCC2CE, 0xE5E8EE)
-    const val MONOCHROME_ACCENT_RGB = 0xF4F4F5
+    val MONOCHROME_DOTS_RGB = listOf(0x525252, 0xA3A3A3, 0xF5F5F5)
+    val MONOCHROME_EXTENDED_RGB = listOf(0x181818, 0x333333, 0x525252, 0x7A7A7A, 0xA8A8A8, 0xE5E5E5)
+    const val MONOCHROME_ACCENT_RGB = 0xF5F5F5
 
     fun rgbToHsl(rgb: Int): Hsl {
         val r = ((rgb shr 16) and 0xFF) / 255f
@@ -84,7 +84,7 @@ object SmartColorExtractor {
                 isMonochrome = true,
                 playerAccentRgb = MONOCHROME_ACCENT_RGB,
                 paletteTriadRgb = MONOCHROME_DOTS_RGB,
-                radialAnchorRgbs = listOf(0x18181B, 0x3F3F46, 0x27272A, 0x52525B)
+                radialAnchorRgbs = listOf(0x181818, 0x3A3A3A, 0x262626, 0x525252)
             )
         }
 
@@ -112,9 +112,9 @@ object SmartColorExtractor {
         var peakChromaScore = 0f
         var peakChromaRgb = -1
         var warmestDarkL = 1f
-        var shadowToneRgb = 0x12141A
+        var shadowToneRgb = -1
         var peakLightL = 0f
-        var highlightToneRgb = 0xD6DAE2
+        var highlightToneRgb = -1
 
         var totalOpaque = 0
         var colorfulCount = 0
@@ -158,17 +158,19 @@ object SmartColorExtractor {
             if (hsl.l < 0.24f) darkPixelCount++
             if (hsl.l > 0.72f) lightPixelCount++
 
-            if (hsl.l in 0.08f..0.28f && hsl.l < warmestDarkL) {
+            if (hsl.l in 0.06f..0.28f && chroma > 0.08f && hsl.s > 0.18f && hsl.l < warmestDarkL) {
                 warmestDarkL = hsl.l
                 shadowToneRgb = rgb
             }
-            if (hsl.l in 0.55f..0.90f && chroma > 0.08f && hsl.l > peakLightL) {
+            if (hsl.l in 0.55f..0.90f && chroma > 0.08f && hsl.s > 0.18f && hsl.l > peakLightL) {
                 peakLightL = hsl.l
                 highlightToneRgb = rgb
             }
 
-            // Ignore near-white / pale cream background paper (high lightness, low chroma) so it doesn't turn brown
-            val isRealColorful = chroma > 0.14f && hsl.s > 0.18f && hsl.l in 0.08f..0.88f
+            // Ignore pale cream paper (#F0E6DA) so it stays monochrome instead of turning muddy brown,
+            // while lowering L/chroma thresholds so dark crimson-on-black covers stay rich & colorful.
+            val isPaleCreamPaper = hsl.s < 0.35f && hsl.l > 0.78f && chroma < 0.14f
+            val isRealColorful = !isPaleCreamPaper && chroma > 0.10f && hsl.s > 0.16f && hsl.l in 0.03f..0.90f
             if (isRealColorful) {
                 colorfulCount++
                 val chromaScore = chroma * hsl.s * (1.0f - abs(hsl.l - 0.52f) * 0.5f)
@@ -226,11 +228,11 @@ object SmartColorExtractor {
             .filter { binWeight[it] > 0f && binCountPixels[it] > 0 }
             .sortedByDescending { binWeight[it] }
 
-        // Monochrome / B&W / white-paper cover (< 4.5% genuinely colorful pixels) -> pure graphite/silver/lunar white
-        if (colorfulRatio < 0.045f || rankedBins.isEmpty()) {
+        // Pure B&W / pale-paper cover (< 1.2% genuinely colorful pixels) -> strict achromatic neutral (S == 0f)
+        if (colorfulRatio < 0.012f || rankedBins.isEmpty()) {
             val monoGrid = spatialGrid.map { cell ->
                 val l = rgbToHsl(cell).l.coerceIn(0.08f, 0.72f)
-                hslToRgb(218f, 0.05f, l)
+                hslToRgb(0f, 0f, l)
             }
             return SmartPaletteResult(
                 isMonochrome = true,
@@ -342,22 +344,32 @@ object SmartColorExtractor {
             val peakHsl = rgbToHsl(peakChromaRgb)
             extended.add(hslToRgb(peakHsl.h, peakHsl.s.coerceIn(0.58f, 0.92f), peakHsl.l.coerceIn(0.42f, 0.65f)))
         }
-        val shadowHsl = rgbToHsl(shadowToneRgb)
-        extended.add(
-            if (shadowHsl.s < 0.14f) hslToRgb(topHue, (topSat * 0.45f).coerceAtMost(0.45f), 0.18f)
-            else hslToRgb(shadowHsl.h, shadowHsl.s.coerceIn(0.35f, 0.72f), 0.20f)
-        )
-        val hlHsl = rgbToHsl(highlightToneRgb)
-        extended.add(
-            if (hlHsl.s < 0.15f) 0xD6DAE2
-            else hslToRgb(hlHsl.h, hlHsl.s.coerceIn(0.40f, 0.82f), 0.68f)
-        )
+        if (shadowToneRgb != -1) {
+            val shadowHsl = rgbToHsl(shadowToneRgb)
+            extended.add(hslToRgb(shadowHsl.h, shadowHsl.s.coerceIn(0.35f, 0.72f), 0.20f))
+        } else {
+            extended.add(hslToRgb(topHue, (topSat * 0.48f).coerceAtMost(0.45f), 0.18f))
+        }
+        if (highlightToneRgb != -1) {
+            val hlHsl = rgbToHsl(highlightToneRgb)
+            extended.add(hslToRgb(hlHsl.h, hlHsl.s.coerceIn(0.42f, 0.85f), 0.68f))
+        } else {
+            extended.add(hslToRgb(topHue, (topSat * 0.55f).coerceIn(0.32f, 0.65f), 0.66f))
+        }
 
+        // Vary depth by Saturation & Lightness strictly within +/- 8 deg (never +28/+42 deg yellow/brown shifts)
         val extendedList = extended.toMutableList()
-        var hueStep = 28f
-        while (extendedList.size < 6) {
-            extendedList.add(hslToRgb((topHue + hueStep) % 360f, topSat.coerceIn(0.42f, 0.78f), 0.36f))
-            hueStep += 42f
+        val depthVariations = listOf(
+            Triple(0f, (topSat * 0.78f).coerceIn(0.45f, 0.85f), 0.16f),
+            Triple(4f, topSat.coerceIn(0.55f, 0.90f), 0.34f),
+            Triple(-4f, (topSat * 0.92f).coerceIn(0.48f, 0.86f), 0.52f),
+            Triple(6f, (topSat * 0.65f).coerceIn(0.38f, 0.75f), 0.24f),
+            Triple(-6f, topSat.coerceIn(0.50f, 0.88f), 0.44f)
+        )
+        var varIdx = 0
+        while (extendedList.size < 6 && varIdx < depthVariations.size) {
+            val (dH, sat, light) = depthVariations[varIdx++]
+            extendedList.add(hslToRgb((topHue + dH + 360f) % 360f, sat, light))
         }
 
         return SmartPaletteResult(

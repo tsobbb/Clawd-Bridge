@@ -370,7 +370,7 @@ fun SystemAndServiceSection(
                     modifier = Modifier.padding(horizontal = 18.dp)
                 )
 
-                // 3. Background Style Selector (5 styles) + Motion Toggle
+                // 3. Background Style Selector (4 styles) + Motion Toggle
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()

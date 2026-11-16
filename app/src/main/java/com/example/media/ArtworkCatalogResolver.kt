@@ -165,6 +165,58 @@ object ArtworkCatalogResolver {
         return UriArtLoadResult(null, "catalog:not_found(${spec.artist} - ${spec.title})")
     }
 
+    /**
+     * Asynchronously searches public HD catalogs (600x600 iTunes, Deezer XL, Genius full art, SoundCloud t500x500)
+     * to replace low-res (<320px) player thumbnails everywhere (Player UI + HTTP /artwork).
+     */
+    fun resolveHdUpgrade(
+        rawArtist: String,
+        rawTitle: String,
+        rawAlbum: String = "",
+        preferSoundCloudFirst: Boolean = false
+    ): UriArtLoadResult? {
+        val spec = buildTrackQuerySpec(rawArtist, rawTitle, rawAlbum)
+        if (spec.searchQueries.isEmpty()) return null
+        val hdCacheKey = "hd|${rawArtist.trim().lowercase(Locale.US)}|${rawTitle.trim().lowercase(Locale.US)}"
+        synchronized(cacheLock) {
+            artworkCache[hdCacheKey]?.let { cached ->
+                if ((cached.artwork?.widthPx ?: 0) >= 400) return cached
+            }
+        }
+
+        val providers: List<Pair<String, (TrackQuerySpec) -> UriArtLoadResult?>> = if (preferSoundCloudFirst) {
+            listOf(
+                "soundcloud" to ::querySoundCloud,
+                "itunes" to ::queryItunes,
+                "deezer" to ::queryDeezer,
+                "genius" to ::queryGenius,
+                "musicbrainz" to ::queryMusicBrainz
+            )
+        } else {
+            listOf(
+                "itunes" to ::queryItunes,
+                "deezer" to ::queryDeezer,
+                "genius" to ::queryGenius,
+                "soundcloud" to ::querySoundCloud,
+                "musicbrainz" to ::queryMusicBrainz
+            )
+        }
+
+        for ((_, fetcher) in providers) {
+            val res = try {
+                fetcher(spec)
+            } catch (_: Throwable) {
+                null
+            }
+            val art = res?.artwork
+            if (art != null && minOf(art.widthPx, art.heightPx) >= 400) {
+                cacheResult(hdCacheKey, res)
+                return res
+            }
+        }
+        return null
+    }
+
     private fun cacheResult(key: String, result: UriArtLoadResult) {
         synchronized(cacheLock) {
             artworkCache[key] = result
@@ -206,7 +258,7 @@ object ArtworkCatalogResolver {
                     )
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                         try {
-                            val bmp = context.contentResolver.loadThumbnail(albumUri, Size(256, 256), null)
+                            val bmp = context.contentResolver.loadThumbnail(albumUri, Size(600, 600), null)
                             val art = ArtworkExtractor.fromBitmap(bmp)
                             if (art != null) {
                                 return UriArtLoadResult(art, "mediastore:thumb ok")
@@ -251,10 +303,11 @@ object ArtworkCatalogResolver {
 
     private fun upgradeSoundCloudArtworkUrl(rawUrl: String): String {
         return rawUrl
-            .replace("-t50x50.", "-t300x300.")
-            .replace("-large.", "-t300x300.")
-            .replace("-small.", "-t300x300.")
-            .replace("-badge.", "-t300x300.")
+            .replace("-t50x50.", "-t500x500.")
+            .replace("-large.", "-t500x500.")
+            .replace("-small.", "-t500x500.")
+            .replace("-badge.", "-t500x500.")
+            .replace("-t300x300.", "-t500x500.")
     }
 
     private fun queryGenius(spec: TrackQuerySpec): UriArtLoadResult? {
@@ -277,8 +330,8 @@ object ArtworkCatalogResolver {
                     val title = result.optString("title")
                     val artist = result.optJSONObject("primary_artist")?.optString("name") ?: ""
                     if (!isReasonableMatch(spec, artist, title)) continue
-                    val artUrl = result.optString("song_art_image_thumbnail_url")
-                        .ifBlank { result.optString("song_art_image_url") }
+                    val artUrl = result.optString("song_art_image_url")
+                        .ifBlank { result.optString("song_art_image_thumbnail_url") }
                         .ifBlank { result.optString("header_image_thumbnail_url") }
                     if (artUrl.isBlank() || artUrl.contains("default_cover", ignoreCase = true)) continue
                     val loaded = loadImageUrl(artUrl, "genius ok")
@@ -304,8 +357,9 @@ object ArtworkCatalogResolver {
                 val artist = item.optJSONObject("artist")?.optString("name") ?: ""
                 if (!isReasonableMatch(spec, artist, title)) continue
                 val album = item.optJSONObject("album") ?: continue
-                val coverUrl = album.optString("cover_medium")
+                val coverUrl = album.optString("cover_xl")
                     .ifBlank { album.optString("cover_big") }
+                    .ifBlank { album.optString("cover_medium") }
                     .ifBlank { album.optString("cover") }
                 if (coverUrl.isBlank()) continue
                 val loaded = loadImageUrl(coverUrl, "deezer ok")
@@ -331,7 +385,7 @@ object ArtworkCatalogResolver {
                 if (!isReasonableMatch(spec, artist, title)) continue
                 val rawUrl = item.optString("artworkUrl100").ifBlank { item.optString("artworkUrl60") }
                 if (rawUrl.isBlank()) continue
-                val hiRes = rawUrl.replace("100x100bb", "300x300bb").replace("60x60bb", "300x300bb")
+                val hiRes = rawUrl.replace("100x100bb", "600x600bb").replace("60x60bb", "600x600bb")
                 val loaded = loadImageUrl(hiRes, "itunes ok")
                 if (loaded != null) return loaded
             }
@@ -365,7 +419,7 @@ object ArtworkCatalogResolver {
                 for (r in 0 until releases.length().coerceAtMost(2)) {
                     val mbid = releases.optJSONObject(r)?.optString("id") ?: continue
                     if (mbid.isBlank()) continue
-                    val coverUrl = "https://coverartarchive.org/release/$mbid/front-250"
+                    val coverUrl = "https://coverartarchive.org/release/$mbid/front-500"
                     val loaded = loadImageUrl(coverUrl, "musicbrainz ok")
                     if (loaded != null) return loaded
                 }
