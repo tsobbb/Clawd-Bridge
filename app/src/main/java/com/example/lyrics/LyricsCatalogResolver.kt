@@ -219,10 +219,15 @@ object LyricsCatalogResolver {
         extractFeatArtists(rawTitle, featArtists)
 
         val cleanArtist = stripMetadataJunk(rawArtist)
-        val cleanTitle = stripMetadataJunk(rawTitle)
+        val rawCleanTitle = stripMetadataJunk(rawTitle)
+        val (coreTitle, titlePlusCollabs) = splitTitleAndInlineCollaborators(rawCleanTitle)
+        titlePlusCollabs.forEach { featArtists.add(it) }
 
-        // Also extract feat artists from artist string parts if multi-artist
-        splitArtistParts(cleanArtist).drop(1).forEach { featArtists.add(it) }
+        val effectiveCleanTitle = coreTitle.ifBlank { rawCleanTitle }
+
+        // Extract individual artists from multi-artist strings (e.g. "lfy,дмитрий уткин")
+        val artistParts = splitArtistParts(cleanArtist)
+        artistParts.drop(1).forEach { featArtists.add(it) }
 
         val hypotheses = mutableListOf<LyricsHypothesis>()
         val seenKeys = hashSetOf<String>()
@@ -237,35 +242,56 @@ object LyricsCatalogResolver {
             }
         }
 
-        // Hypothesis 2 (SounCloud/YouTube split "Left - Right") checked first or alongside H1
+        // Hypothesis 2 (SoundCloud/YouTube split "Left - Right") checked first alongside H1
         val titleForSplit = stripJunkPreserveSeparator(rawTitle)
         val splitPair = splitTitleArtistPair(titleForSplit)
         if (splitPair != null) {
             val (left, right) = splitPair
-            val cleanLeft = stripMetadataJunk(left)
-            val cleanRight = stripMetadataJunk(right)
-            if (cleanLeft.isNotBlank() && cleanRight.isNotBlank()) {
+            val cleanLeftRaw = stripMetadataJunk(left)
+            val cleanRightRaw = stripMetadataJunk(right)
+            val (coreLeft, leftCollabs) = splitTitleAndInlineCollaborators(cleanLeftRaw)
+            val (coreRight, rightCollabs) = splitTitleAndInlineCollaborators(cleanRightRaw)
+            leftCollabs.forEach { featArtists.add(it) }
+            rightCollabs.forEach { featArtists.add(it) }
+
+            val effLeft = coreLeft.ifBlank { cleanLeftRaw }
+            val effRight = coreRight.ifBlank { cleanRightRaw }
+            if (effLeft.isNotBlank() && effRight.isNotBlank()) {
                 // H2a: (Left = Artist, Right = Title)
-                addHypothesis(cleanLeft, cleanRight, isSplit = true, label = "H2(L-R)")
+                addHypothesis(cleanLeftRaw, effRight, isSplit = true, label = "H2(L-R)")
                 // H2b: (Right = Artist, Left = Title)
-                addHypothesis(cleanRight, cleanLeft, isSplit = true, label = "H2(R-L)")
+                addHypothesis(cleanRightRaw, effLeft, isSplit = true, label = "H2(R-L)")
             }
         }
 
-        // Hypothesis 1: (cleanArtist, cleanTitle)
-        addHypothesis(cleanArtist, cleanTitle, isSplit = false, label = "H1")
+        // Hypothesis 1: Prioritize clean (primaryArtist, coreTitle) and secondary co-artist hypotheses for multi-artist / + tracks
+        if (artistParts.size > 1 && effectiveCleanTitle.isNotBlank()) {
+            addHypothesis(artistParts.first(), effectiveCleanTitle, isSplit = false, label = "H1(Primary)")
+            addHypothesis(artistParts[1], effectiveCleanTitle, isSplit = false, label = "H1(Secondary)")
+            val extraCollab = featArtists.firstOrNull { feat ->
+                artistParts.take(2).none { normalizeForMatch(it) == normalizeForMatch(feat) }
+            }
+            if (!extraCollab.isNullOrBlank()) {
+                addHypothesis(extraCollab, effectiveCleanTitle, isSplit = false, label = "H1(Feat)")
+            }
+            addHypothesis(artistParts.joinToString(" "), effectiveCleanTitle, isSplit = false, label = "H1")
+        } else {
+            addHypothesis(cleanArtist, effectiveCleanTitle, isSplit = false, label = "H1")
+            if (titlePlusCollabs.isNotEmpty() && effectiveCleanTitle.isNotBlank()) {
+                addHypothesis(titlePlusCollabs.first(), effectiveCleanTitle, isSplit = false, label = "H1(Feat)")
+            }
+        }
 
-        // Also if cleanArtist contains multiple artists, add primary-only H1 variant
-        val artistParts = splitArtistParts(cleanArtist)
-        if (artistParts.size > 1 && cleanTitle.isNotBlank()) {
-            addHypothesis(artistParts.first(), cleanTitle, isSplit = false, label = "H1(Primary)")
+        // Preserve unsplit rawCleanTitle as lower-priority fallback in case '+' is part of the real song name
+        if (coreTitle.isNotBlank() && normalizeForMatch(coreTitle) != normalizeForMatch(rawCleanTitle)) {
+            addHypothesis(cleanArtist, rawCleanTitle, isSplit = false, label = "H1(RawTitle)")
         }
 
         return LyricsQueryPlan(
             rawArtist = rawArtist,
             rawTitle = rawTitle,
             cleanArtist = cleanArtist,
-            cleanTitle = cleanTitle,
+            cleanTitle = effectiveCleanTitle,
             featArtists = featArtists.toList(),
             originalModifiers = originalModifiers,
             hypotheses = hypotheses
@@ -285,6 +311,25 @@ object LyricsCatalogResolver {
                 if (part.isNotBlank()) out.add(part)
             }
         }
+    }
+
+    internal fun splitTitleAndInlineCollaborators(titleSegment: String): Pair<String, List<String>> {
+        if (titleSegment.isBlank()) return "" to emptyList()
+        val match = Regex(
+            """^(.+?)\s+(?:\+\s*([^+].+)|(?:w/|with)\s+(.+))$""",
+            RegexOption.IGNORE_CASE
+        ).find(titleSegment.trim()) ?: return titleSegment.trim() to emptyList()
+
+        val core = match.groupValues[1].trim()
+        val rawCollab = (match.groupValues[2].ifBlank { match.groupValues[3] }).trim()
+        if (core.isBlank() || rawCollab.isBlank()) return titleSegment.trim() to emptyList()
+
+        val parts = splitArtistParts(rawCollab).filter { part ->
+            val low = part.lowercase(Locale.US)
+            low !in VERSION_MODIFIERS && low.any { it.isLetter() }
+        }
+        if (parts.isEmpty()) return titleSegment.trim() to emptyList()
+        return core to parts
     }
 
     internal fun stripMetadataJunk(raw: String): String {
@@ -325,7 +370,13 @@ object LyricsCatalogResolver {
 
     internal fun splitArtistParts(rawArtist: String): List<String> {
         if (rawArtist.isBlank()) return emptyList()
-        return rawArtist
+        // Strip parenthetical transliterations/notes before splitting (e.g. "дмитрий уткин (dmitry utkin), semmmyq")
+        val withoutParens = rawArtist
+            .replace(Regex("""[\(\[][^)\]]*[\)\]]"""), " ")
+            .replace(Regex("""\s+"""), " ")
+            .trim()
+            .ifBlank { rawArtist }
+        return withoutParens
             .split(Regex("""\s*(?:,|&|\+|×|/|\bx\b|\bfeat\.?\b|\bft\.?\b|\bw/\b|\bwith\b)\s*""", RegexOption.IGNORE_CASE))
             .map { it.trim() }
             .filter { it.length >= 2 || it.any { ch -> ch.isLetterOrDigit() } }
@@ -421,8 +472,12 @@ object LyricsCatalogResolver {
         for (expPart in expectedParts) {
             for (candPart in candParts) {
                 val sim = computeFieldSimilarity(expPart, candPart)
-                // Slight scaling when matching just one member of a multi-artist collab vs full credit
-                val weighted = if (expectedParts.size > 1 || candParts.size > 1) sim * 0.96f else sim
+                // Do NOT penalize when at least one key artist strongly matches (>= 0.85f) despite extra feats/collabs
+                val weighted = if (sim < 0.85f && (expectedParts.size > 1 || candParts.size > 1)) {
+                    sim * 0.96f
+                } else {
+                    sim
+                }
                 if (weighted > best) best = weighted
             }
         }
@@ -753,7 +808,7 @@ object LyricsCatalogResolver {
 
         try {
             // Step A: Try /api/get first on top hypotheses (fast exact hit)
-            for (hyp in plan.hypotheses.take(3)) {
+            for (hyp in plan.hypotheses.take(4)) {
                 if (hyp.artist.isBlank() || hyp.title.isBlank()) continue
                 val durParam = if (trackDurationSec > 0) "&duration=$trackDurationSec" else ""
                 val getUrl = "https://lrclib.net/api/get?artist_name=${urlEncode(hyp.artist)}&track_name=${urlEncode(hyp.title)}$durParam"
@@ -778,7 +833,7 @@ object LyricsCatalogResolver {
 
             // Step B: ALWAYS run /api/search if /api/get yielded no synced LRC (or 404)
             if (!hasFoundSynced) {
-                for (hyp in plan.hypotheses.take(3)) {
+                for (hyp in plan.hypotheses.take(4)) {
                     if (hyp.title.isBlank()) continue
                     val searchUrls = buildList {
                         if (hyp.artist.isNotBlank()) {
@@ -899,7 +954,7 @@ object LyricsCatalogResolver {
         val seenIds = hashSetOf<Long>()
 
         try {
-            for (hyp in plan.hypotheses.take(2)) {
+            for (hyp in plan.hypotheses.take(3)) {
                 val query = "${hyp.artist} ${hyp.title}".trim()
                 if (query.isBlank()) continue
                 val res = BridgeHttpClient.getTextDetailed(
@@ -1059,7 +1114,7 @@ object LyricsCatalogResolver {
         val seenHashes = hashSetOf<String>()
 
         try {
-            for (hyp in plan.hypotheses.take(2)) {
+            for (hyp in plan.hypotheses.take(3)) {
                 val query = "${hyp.artist} ${hyp.title}".trim()
                 if (query.isBlank()) continue
                 val searchUrl = "https://mobileservice.kugou.com/api/v3/search/song?format=json&keyword=${urlEncode(query)}&page=1&pagesize=8&showtype=1"
@@ -1269,7 +1324,7 @@ object LyricsCatalogResolver {
         var lastNote = "200 (0 совп.)"
 
         try {
-            for (hyp in plan.hypotheses.take(2)) {
+            for (hyp in plan.hypotheses.take(4)) {
                 val query = "${hyp.artist} ${hyp.title}".trim()
                 if (query.isBlank()) continue
                 val res = BridgeHttpClient.getTextDetailed(
@@ -1297,7 +1352,8 @@ object LyricsCatalogResolver {
                     for (h in 0 until hits.length().coerceAtMost(5)) {
                         val hitResult = hits.optJSONObject(h)?.optJSONObject("result") ?: continue
                         val hitTitle = hitResult.optString("title").trim()
-                        val hitArtist = hitResult.optJSONObject("primary_artist")?.optString("name").orEmpty().trim()
+                        val hitArtist = hitResult.optString("artist_names").trim()
+                            .ifBlank { hitResult.optJSONObject("primary_artist")?.optString("name").orEmpty().trim() }
                         val eval = evaluateCandidateMetadata(
                             plan = plan,
                             trackDurationSec = trackDurationSec,

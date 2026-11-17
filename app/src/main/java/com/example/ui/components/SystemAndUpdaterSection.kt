@@ -512,6 +512,7 @@ private fun BridgeUpdaterBlock(
             is BridgeUpdateState.UpdateAvailable -> lastKnownRelease = updateState.release
             is BridgeUpdateState.Downloading -> lastKnownRelease = updateState.release
             is BridgeUpdateState.NeedsInstallPermission -> lastKnownRelease = updateState.release
+            is BridgeUpdateState.WaitingUserConfirmation -> updateState.release?.let { lastKnownRelease = it }
             else -> Unit
         }
     }
@@ -728,8 +729,15 @@ private fun BridgeUpdaterBlock(
             BridgeInstallPermissionPrompt(context = context)
         }
 
-        AnimatedVisibility(visible = updateState is BridgeUpdateState.Installing) {
-            val inst = updateState as? BridgeUpdateState.Installing
+        AnimatedVisibility(
+            visible = updateState is BridgeUpdateState.Installing ||
+                updateState is BridgeUpdateState.WaitingUserConfirmation
+        ) {
+            val statusText = when (updateState) {
+                is BridgeUpdateState.Installing -> updateState.statusText
+                is BridgeUpdateState.WaitingUserConfirmation -> updateState.statusText
+                else -> "Установка..."
+            }
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -740,7 +748,7 @@ private fun BridgeUpdaterBlock(
                     modifier = Modifier.size(width = 22.dp, height = 14.dp)
                 )
                 Text(
-                    text = inst?.statusText ?: "Установка...",
+                    text = statusText,
                     style = MaterialTheme.typography.bodySmall.copy(color = TextSecondary)
                 )
             }
@@ -800,6 +808,7 @@ private fun BridgeUpdaterBlock(
                 is BridgeUpdateState.UpdateAvailable -> updateState.release
                 is BridgeUpdateState.Downloading -> updateState.release
                 is BridgeUpdateState.NeedsInstallPermission -> updateState.release
+                is BridgeUpdateState.WaitingUserConfirmation -> updateState.release ?: lastKnownRelease
                 else -> lastKnownRelease
             },
             onDismiss = { showUpdateSheet = false }
@@ -1097,6 +1106,22 @@ private fun BridgeUpdateDetailsSheet(
                         )
                     }
                 }
+                is BridgeUpdateState.WaitingUserConfirmation -> {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        WaveLoadingDots(
+                            color = MintCta,
+                            timeSecondsState = livingPalette.uiTimeSecondsState,
+                            modifier = Modifier.size(width = 22.dp, height = 14.dp)
+                        )
+                        Text(
+                            text = updateState.statusText,
+                            style = MaterialTheme.typography.bodySmall.copy(color = TextSecondary)
+                        )
+                    }
+                }
                 is BridgeUpdateState.Error -> {
                     Text(
                         text = updateState.message,
@@ -1106,13 +1131,13 @@ private fun BridgeUpdateDetailsSheet(
                 else -> Unit
             }
 
-            if (release != null &&
-                updateState !is BridgeUpdateState.Downloading &&
-                updateState !is BridgeUpdateState.Installing &&
-                updateState !is BridgeUpdateState.NeedsInstallPermission
-            ) {
+            val isInstallBusy = updateState is BridgeUpdateState.Downloading ||
+                updateState is BridgeUpdateState.Installing ||
+                updateState is BridgeUpdateState.WaitingUserConfirmation
+            if (release != null && updateState !is BridgeUpdateState.NeedsInstallPermission) {
                 MintCtaButton(
                     onClick = { BridgeAppUpdater.downloadAndInstall(context, release) },
+                    enabled = !isInstallBusy,
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("sheet_install_bridge_update_button")
@@ -1124,7 +1149,12 @@ private fun BridgeUpdateDetailsSheet(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "Скачать и установить",
+                        text = when (updateState) {
+                            is BridgeUpdateState.Downloading -> "Загрузка обновления..."
+                            is BridgeUpdateState.Installing -> "Установка..."
+                            is BridgeUpdateState.WaitingUserConfirmation -> "Ожидание подтверждения..."
+                            else -> "Скачать и установить"
+                        },
                         style = MaterialTheme.typography.labelLarge
                     )
                 }

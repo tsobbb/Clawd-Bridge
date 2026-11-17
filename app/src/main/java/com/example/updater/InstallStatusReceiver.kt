@@ -6,20 +6,27 @@ import android.content.Intent
 import android.content.pm.PackageInstaller
 import android.os.Build
 import android.util.Log
+import android.widget.Toast
+import java.util.Collections
 
 /**
  * Receives callbacks from PackageInstaller.Session.commit(), launching the system install confirmation
- * sheet on STATUS_PENDING_USER_ACTION with FLAG_ACTIVITY_NEW_TASK.
+ * sheet strictly once per sessionId on STATUS_PENDING_USER_ACTION.
  */
 class InstallStatusReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
         if (intent == null) return
+        val sessionId = intent.getIntExtra(PackageInstaller.EXTRA_SESSION_ID, -1)
         val status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE)
         val statusMessage = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE) ?: ""
-        Log.i(TAG, "InstallStatusReceiver status=$status msg=$statusMessage")
+        Log.i(TAG, "InstallStatusReceiver sessionId=$sessionId status=$status msg=$statusMessage")
 
         when (status) {
             PackageInstaller.STATUS_PENDING_USER_ACTION -> {
+                if (!markConfirmationHandledIfNew(sessionId)) {
+                    Log.d(TAG, "Ignoring duplicate STATUS_PENDING_USER_ACTION for sessionId=$sessionId")
+                    return
+                }
                 val confirmIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     intent.getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java)
                 } else {
@@ -27,10 +34,10 @@ class InstallStatusReceiver : BroadcastReceiver() {
                     intent.getParcelableExtra(Intent.EXTRA_INTENT)
                 }
                 if (confirmIntent != null) {
-                    confirmIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    confirmIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                    BridgeAppUpdater.onAwaitingUserConfirmation(sessionId)
                     runCatching {
                         context.startActivity(confirmIntent)
-                        BridgeAppUpdater.onAwaitingUserConfirmation()
                     }.onFailure { err ->
                         Log.e(TAG, "Failed to launch system installer UI: ${err.message}", err)
                         BridgeAppUpdater.onInstallFailed("Не удалось открыть системный диалог установки: ${err.message}")
@@ -43,7 +50,7 @@ class InstallStatusReceiver : BroadcastReceiver() {
                 BridgeAppUpdater.onInstallSucceeded(context)
             }
             PackageInstaller.STATUS_FAILURE_ABORTED -> {
-                BridgeAppUpdater.onInstallFailed("Установка отменена пользователем")
+                BridgeAppUpdater.onInstallAborted()
             }
             else -> {
                 val readable = when (status) {
@@ -53,6 +60,9 @@ class InstallStatusReceiver : BroadcastReceiver() {
                     PackageInstaller.STATUS_FAILURE_INVALID -> "Повреждённый APK-файл"
                     else -> statusMessage.ifBlank { "Ошибка установки (код $status)" }
                 }
+                runCatching {
+                    Toast.makeText(context.applicationContext, readable, Toast.LENGTH_LONG).show()
+                }
                 BridgeAppUpdater.onInstallFailed(readable)
             }
         }
@@ -60,5 +70,18 @@ class InstallStatusReceiver : BroadcastReceiver() {
 
     companion object {
         private const val TAG = "InstallStatusReceiver"
+        private val handledSessionIds: MutableSet<Int> = Collections.synchronizedSet(HashSet())
+
+        internal fun markConfirmationHandledIfNew(sessionId: Int): Boolean {
+            if (sessionId < 0) return true
+            if (handledSessionIds.size > 64) {
+                handledSessionIds.clear()
+            }
+            return handledSessionIds.add(sessionId)
+        }
+
+        internal fun clearHandledSessionsForTest() {
+            handledSessionIds.clear()
+        }
     }
 }

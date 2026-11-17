@@ -143,14 +143,26 @@ object ContrastGuard {
     fun normalizeMeshSilkRgb(rgb: Int): Int {
         val hsl = rgbToHsl(rgb)
         if (hsl.s < 0.08f) {
-            return hslToRgb(0f, 0f, hsl.l.coerceIn(0.22f, 0.38f))
+            return hslToRgb(0f, 0f, hsl.l.coerceIn(0.22f, 0.42f))
         }
         val isWarmCream = hsl.h in 20f..55f && hsl.s < 0.34f && hsl.l > 0.65f
         if (isWarmCream) {
-            return hslToRgb(0f, 0f, 0.34f)
+            return hslToRgb(0f, 0f, 0.36f)
         }
-        val s = hsl.s.coerceIn(0.45f, 0.75f)
-        val l = hsl.l.coerceIn(0.32f, 0.52f)
+        val s = hsl.s.coerceIn(0.50f, 0.85f)
+        val l = hsl.l.coerceIn(0.38f, 0.52f)
+        return hslToRgb(hsl.h, s, l)
+    }
+
+    internal fun buildMeshSilkShadowAnchorRgb(rgb: Int): Int {
+        val hsl = rgbToHsl(rgb)
+        if (hsl.s < 0.08f) {
+            return hslToRgb(0f, 0f, 0.055f)
+        }
+        // Prevent muddy warm brown shadows (#403010) on amber/yellowish tones
+        val isMuddyWarmHue = hsl.h in 18f..58f
+        val s = if (isMuddyWarmHue) 0.14f else hsl.s.coerceIn(0.25f, 0.52f)
+        val l = if (isMuddyWarmHue) 0.05f else hsl.l.coerceIn(0.04f, 0.09f)
         return hslToRgb(hsl.h, s, l)
     }
 
@@ -468,42 +480,96 @@ internal fun computeMeshSilkPalette(
 ): List<Color> {
     if (!isTrackActive) {
         return listOf(
-            Color(0xFF1F6E62),
-            Color(0xFF284887),
-            Color(0xFF235D82),
-            Color(0xFF42367A),
-            Color(0xFF195256),
-            Color(0xFF397F76)
+            Color(0xFF0A141A), // deep shadow anchor 1
+            Color(0xFF1F6E62), // vivid dominant teal
+            Color(0xFF2B4C8E), // contrasting blue accent
+            Color(0xFF0D101E), // deep shadow anchor 2
+            Color(0xFF42367A), // luminous violet fold
+            Color(0xFF163846)
         )
     }
 
     val sourceHex = extendedColorsHex.ifEmpty { accentColorsHex }
     val primaryRaw = ContrastGuard.parseHexRgb(accentColorHex, 0xE5E5E5)
-    val parsed = sourceHex.map { ContrastGuard.parseHexRgb(it, primaryRaw) }
-    val isMono = parsed.all { ContrastGuard.rgbToHsl(it).s < 0.08f }
+    val parsed = sourceHex.map { ContrastGuard.parseHexRgb(it, primaryRaw) }.ifEmpty { listOf(primaryRaw) }
+    val isMono = parsed.all { raw ->
+        val hsl = ContrastGuard.rgbToHsl(raw)
+        val r = (raw shr 16) and 0xFF
+        val g = (raw shr 8) and 0xFF
+        val b = raw and 0xFF
+        val delta = max(r, max(g, b)) - min(r, min(g, b))
+        hsl.s < 0.08f || delta < 22
+    }
 
     if (isMono) {
+        // High-contrast strictly achromatic silk: obsidian shadows + charcoal + silver wave + graphite rim (S = 0)
         return listOf(
-            Color(0xFF38383C),
-            Color(0xFF4E4E54),
-            Color(0xFF424248),
-            Color(0xFF5D5D64),
-            Color(0xFF3A3A3F),
-            Color(0xFF616168)
+            Color(0xFF0C0C0C), // shadow anchor 1 (L ~ 0.05)
+            Color(0xFF3E3E3E), // mid charcoal wave
+            Color(0xFF6E6E6E), // bright silver accent
+            Color(0xFF141414), // shadow anchor 2 (L ~ 0.08)
+            Color(0xFF929292), // specular fold
+            Color(0xFF282828)
         )
     }
 
-    val normalized = parsed.take(6).map { raw ->
-        ContrastGuard.normalizeMeshSilkRgb(raw).toComposeColor()
-    }.toMutableList()
+    val chromatic = parsed.filter { raw ->
+        val hsl = ContrastGuard.rgbToHsl(raw)
+        val isWarmCream = hsl.h in 20f..55f && hsl.s < 0.34f && hsl.l > 0.65f
+        hsl.s >= 0.14f && !isWarmCream
+    }.ifEmpty { listOf(primaryRaw) }
 
-    val fallbackSeed = ContrastGuard.normalizeMeshSilkRgb(primaryRaw).toComposeColor()
-    var idx = 0
-    while (normalized.size < 6) {
-        normalized.add(normalized.getOrElse(idx % normalized.size.coerceAtLeast(1)) { fallbackSeed })
-        idx++
+    val dominantRaw = chromatic.first()
+    val dominantHsl = ContrastGuard.rgbToHsl(dominantRaw)
+    val dominantColor = ContrastGuard.normalizeMeshSilkRgb(dominantRaw).toComposeColor()
+
+    fun hueDiffDeg(a: Float, b: Float): Float {
+        val d = abs(a - b)
+        return min(d, 360f - d)
     }
-    return normalized
+
+    // Pick contrasting accent with clear hue or brightness difference from dominant
+    val secondaryRaw = chromatic.drop(1).firstOrNull { cand ->
+        val cHsl = ContrastGuard.rgbToHsl(cand)
+        hueDiffDeg(dominantHsl.h, cHsl.h) >= 24f || abs(dominantHsl.l - cHsl.l) >= 0.20f
+    }
+    val secondaryColor = if (secondaryRaw != null) {
+        ContrastGuard.normalizeMeshSilkRgb(secondaryRaw).toComposeColor()
+    } else {
+        // Same-hue contrasting light ribbon (avoid brownish shift)
+        ContrastGuard.hslToRgb(
+            h = dominantHsl.h,
+            s = dominantHsl.s.coerceIn(0.55f, 0.88f),
+            l = if (dominantHsl.l < 0.44f) 0.52f else 0.34f
+        ).toComposeColor()
+    }
+
+    val highlightRaw = chromatic.drop(1).firstOrNull { cand ->
+        cand != secondaryRaw &&
+            (secondaryRaw == null || hueDiffDeg(ContrastGuard.rgbToHsl(secondaryRaw).h, ContrastGuard.rgbToHsl(cand).h) >= 18f)
+    }
+    val highlightColor = if (highlightRaw != null) {
+        val hlHsl = ContrastGuard.rgbToHsl(highlightRaw)
+        ContrastGuard.hslToRgb(
+            h = hlHsl.h,
+            s = hlHsl.s.coerceIn(0.52f, 0.88f),
+            l = hlHsl.l.coerceIn(0.44f, 0.58f)
+        ).toComposeColor()
+    } else {
+        ContrastGuard.hslToRgb(
+            h = dominantHsl.h,
+            s = dominantHsl.s.coerceIn(0.58f, 0.90f),
+            l = 0.54f
+        ).toComposeColor()
+    }
+
+    val shadow0 = ContrastGuard.buildMeshSilkShadowAnchorRgb(dominantRaw).toComposeColor()
+    val shadow1 = ContrastGuard.buildMeshSilkShadowAnchorRgb(secondaryRaw ?: dominantRaw).toComposeColor()
+    val bridgeTone = lerp(dominantColor, shadow0, 0.42f)
+
+    // Slots ordered for high-contrast 4-5 node mesh shader:
+    // [0]=shadow0, [1]=vivid dominant, [2]=contrasting accent, [3]=shadow1, [4]=luminous highlight, [5]=bridge
+    return listOf(shadow0, dominantColor, secondaryColor, shadow1, highlightColor, bridgeTone)
 }
 
 internal fun computeExtendedSixPalette(
@@ -553,10 +619,11 @@ uniform float3 uColor0;
 uniform float3 uColor1;
 uniform float3 uColor2;
 uniform float3 uColor3;
+uniform float3 uColor4;
 
 float2 warp(float2 p, float t) {
-    float x = sin(p.y * 2.1 + t * 0.42) * 0.34 + cos(p.x * 1.7 - t * 0.31) * 0.28;
-    float y = cos(p.x * 2.3 + t * 0.37) * 0.34 + sin(p.y * 1.9 + t * 0.29) * 0.28;
+    float x = sin(p.y * 2.2 + t * 0.42) * 0.24 + cos(p.x * 1.8 - t * 0.31) * 0.18;
+    float y = cos(p.x * 2.1 + t * 0.37) * 0.24 + sin(p.y * 1.9 + t * 0.29) * 0.18;
     return p + float2(x, y);
 }
 
@@ -564,31 +631,34 @@ half4 main(float2 fragCoord) {
     float2 safeRes = float2(max(uResolution.x, 1.0), max(uResolution.y, 1.0));
     float2 uv = fragCoord / safeRes;
     float aspect = safeRes.x / safeRes.y;
-    float2 p = float2((uv.x - 0.5) * aspect, uv.y - 0.5) * 1.85;
+    // Scale 1.0f keeps all 4-5 gradient anchors distinct across viewport without collapsing into mud
+    float2 p = float2((uv.x - 0.5) * aspect, uv.y - 0.5) * 1.0;
 
     float t = uTime * 0.65;
     float2 q = warp(p, t);
-    float2 r = warp(q * 1.15 + float2(1.4, -0.9), -t * 0.8);
+    float2 r = warp(q * 1.05 + float2(0.45, -0.35), -t * 0.72);
 
-    float d0 = length(r - float2(-0.55, -0.50));
-    float d1 = length(r - float2(0.60, -0.35));
-    float d2 = length(r - float2(-0.35, 0.65));
-    float d3 = length(r - float2(0.55, 0.55));
+    // Cross-diagonal shadow anchors (uColor0, uColor3) & vivid silk accents (uColor1, uColor2)
+    float d0 = length(r - float2(-0.34, -0.42));
+    float d1 = length(r - float2(0.28, -0.18));
+    float d2 = length(r - float2(-0.24, 0.24));
+    float d3 = length(r - float2(0.36, 0.44));
 
-    float w0 = exp(-d0 * d0 * 1.10);
-    float w1 = exp(-d1 * d1 * 1.10);
-    float w2 = exp(-d2 * d2 * 1.10);
-    float w3 = exp(-d3 * d3 * 1.10);
+    float w0 = exp(-d0 * d0 * 2.45);
+    float w1 = exp(-d1 * d1 * 2.35);
+    float w2 = exp(-d2 * d2 * 2.35);
+    float w3 = exp(-d3 * d3 * 2.45);
 
     float total = max(w0 + w1 + w2 + w3, 0.0001);
     float3 mesh = (uColor0 * w0 + uColor1 * w1 + uColor2 * w2 + uColor3 * w3) / total;
 
-    float fold = 0.5 + 0.5 * sin(r.x * 2.4 + r.y * 2.1 + t * 0.5);
-    mesh = mix(mesh, uColor2 * 0.80 + uColor0 * 0.20, fold * 0.16);
+    // Flowing luminous highlight silk fold without crushing waves into flat gray
+    float ridge = smoothstep(0.38, 0.92, 0.5 + 0.5 * sin(r.x * 2.7 - r.y * 2.3 + t * 0.55));
+    mesh = mix(mesh, uColor4, ridge * 0.28);
 
-    // Subtle edge depth without crushing waves into black
-    float edgeFade = smoothstep(0.0, 1.0, uv.y) * 0.18;
-    mesh = mix(mesh, mesh * 0.72, edgeFade);
+    // Gentle bottom contrast anchor keeping dark troughs intact
+    float bottomShade = smoothstep(0.65, 1.0, uv.y) * 0.22;
+    mesh = mix(mesh, uColor0, bottomShade);
 
     return half4(clamp(mesh, float3(0.0), float3(1.0)), 1.0);
 }
@@ -625,11 +695,11 @@ private fun HypnoticMeshSilkBackdrop(
     modifier: Modifier = Modifier
 ) {
     val ext = palette.extendedColorStates
-    val c0State = ext[0]
-    val c1State = ext[1]
-    val c2State = ext[2]
-    val c3State = ext[3]
-    val c4State = ext[4]
+    val shadow0State = ext[0]
+    val dominantState = ext[1]
+    val secondaryState = ext[2]
+    val shadow1State = ext[3]
+    val highlightState = ext[4]
     val tState = palette.bgTimeSecondsState
 
     var shaderFailed by remember { mutableStateOf(false) }
@@ -667,10 +737,11 @@ private fun HypnoticMeshSilkBackdrop(
             val h = size.height
             if (w <= 0f || h <= 0f) return@Canvas
 
-            val primaryGlow = c0State.value
-            val secondaryGlow = c1State.value
-            val waveGlow = c2State.value
-            val highlightGlow = lerp(c3State.value, c4State.value, 0.45f)
+            val shadow0 = shadow0State.value
+            val dominantGlow = dominantState.value
+            val secondaryGlow = secondaryState.value
+            val shadow1 = shadow1State.value
+            val highlightGlow = highlightState.value
             val t = tState.value
 
             val shader = if (!shaderFailed) runtimeShader else null
@@ -679,10 +750,11 @@ private fun HypnoticMeshSilkBackdrop(
                 val drawn = try {
                     shader.setFloatUniform("uResolution", w, h)
                     shader.setFloatUniform("uTime", t)
-                    shader.setFloatUniform("uColor0", primaryGlow.red, primaryGlow.green, primaryGlow.blue)
-                    shader.setFloatUniform("uColor1", secondaryGlow.red, secondaryGlow.green, secondaryGlow.blue)
-                    shader.setFloatUniform("uColor2", waveGlow.red, waveGlow.green, waveGlow.blue)
-                    shader.setFloatUniform("uColor3", highlightGlow.red, highlightGlow.green, highlightGlow.blue)
+                    shader.setFloatUniform("uColor0", shadow0.red, shadow0.green, shadow0.blue)
+                    shader.setFloatUniform("uColor1", dominantGlow.red, dominantGlow.green, dominantGlow.blue)
+                    shader.setFloatUniform("uColor2", secondaryGlow.red, secondaryGlow.green, secondaryGlow.blue)
+                    shader.setFloatUniform("uColor3", shadow1.red, shadow1.green, shadow1.blue)
+                    shader.setFloatUniform("uColor4", highlightGlow.red, highlightGlow.green, highlightGlow.blue)
                     drawRect(brush = brush)
                     true
                 } catch (_: Throwable) {
@@ -692,36 +764,36 @@ private fun HypnoticMeshSilkBackdrop(
                 if (drawn) return@Canvas
             }
 
-            // Crash-proof Canvas silk mesh fallback (used on API < 33 or if a driver rejects AGSL)
+            // Crash-proof Canvas silk mesh fallback preserving deep shadow anchors & contrasting ribbons
             drawRect(
                 brush = Brush.linearGradient(
-                    colors = listOf(primaryGlow, waveGlow, secondaryGlow)
+                    colors = listOf(shadow0, dominantGlow, shadow1)
                 )
             )
-            val radius = max(w, h) * 0.90f
+            val radius = max(w, h) * 0.80f
             drawSoftCloud(
-                center = Offset(w * (0.28f + 0.22f * sin(t * 0.35f)), h * (0.26f + 0.16f * cos(t * 0.28f))),
+                center = Offset(w * (0.72f - 0.16f * cos(t * 0.31f)), h * (0.30f + 0.14f * sin(t * 0.24f))),
                 radius = radius,
-                color = primaryGlow,
+                color = dominantGlow,
                 alpha = 0.85f,
-                scaleX = 1.25f,
+                scaleX = 1.2f,
                 scaleY = 0.95f
             )
             drawSoftCloud(
-                center = Offset(w * (0.74f - 0.20f * cos(t * 0.31f)), h * (0.48f + 0.18f * sin(t * 0.24f))),
+                center = Offset(w * (0.28f + 0.18f * sin(t * 0.35f)), h * (0.64f + 0.14f * cos(t * 0.28f))),
                 radius = radius,
                 color = secondaryGlow,
                 alpha = 0.82f,
                 scaleX = 0.95f,
-                scaleY = 1.25f
+                scaleY = 1.2f
             )
             drawSoftCloud(
-                center = Offset(w * (0.45f + 0.24f * sin(t * 0.27f + 1.4f)), h * (0.78f - 0.14f * cos(t * 0.33f))),
-                radius = radius,
+                center = Offset(w * (0.50f + 0.20f * sin(t * 0.27f + 1.4f)), h * (0.45f - 0.14f * cos(t * 0.33f))),
+                radius = radius * 0.75f,
                 color = highlightGlow,
-                alpha = 0.78f,
-                scaleX = 1.2f,
-                scaleY = 1.05f
+                alpha = 0.45f,
+                scaleX = 1.15f,
+                scaleY = 1.0f
             )
         }
     }

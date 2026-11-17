@@ -154,23 +154,23 @@ object SmartColorExtractor {
             val maxC = max(r / 255f, max(g / 255f, b / 255f))
             val minC = min(r / 255f, min(g / 255f, b / 255f))
             val chroma = maxC - minC
+            val hsvS = if (maxC > 1e-5f) chroma / maxC else 0f
             val hsl = rgbToHsl(rgb)
             if (hsl.l < 0.24f) darkPixelCount++
             if (hsl.l > 0.72f) lightPixelCount++
 
-            if (hsl.l in 0.06f..0.28f && chroma > 0.08f && hsl.s > 0.18f && hsl.l < warmestDarkL) {
+            if (hsl.l in 0.06f..0.28f && chroma >= 0.12f && hsvS >= 0.22f && hsl.l < warmestDarkL) {
                 warmestDarkL = hsl.l
                 shadowToneRgb = rgb
             }
-            if (hsl.l in 0.55f..0.90f && chroma > 0.08f && hsl.s > 0.18f && hsl.l > peakLightL) {
+            if (hsl.l in 0.55f..0.90f && chroma >= 0.12f && hsvS >= 0.22f && hsl.l > peakLightL) {
                 peakLightL = hsl.l
                 highlightToneRgb = rgb
             }
 
-            // Ignore pale cream paper (#F0E6DA) so it stays monochrome instead of turning muddy brown,
-            // while lowering L/chroma thresholds so dark crimson-on-black covers stay rich & colorful.
+            // Require real RGB chroma >= 0.12 (delta >= 30/255) AND HSV saturation >= 0.22 so dark/foggy grays stay pure B&W
             val isPaleCreamPaper = hsl.s < 0.35f && hsl.l > 0.78f && chroma < 0.14f
-            val isRealColorful = !isPaleCreamPaper && chroma > 0.10f && hsl.s > 0.16f && hsl.l in 0.03f..0.90f
+            val isRealColorful = !isPaleCreamPaper && chroma >= 0.12f && hsvS >= 0.22f && hsl.l in 0.03f..0.90f
             if (isRealColorful) {
                 colorfulCount++
                 val chromaScore = chroma * hsl.s * (1.0f - abs(hsl.l - 0.52f) * 0.5f)
@@ -228,8 +228,12 @@ object SmartColorExtractor {
             .filter { binWeight[it] > 0f && binCountPixels[it] > 0 }
             .sortedByDescending { binWeight[it] }
 
-        // Pure B&W / pale-paper cover (< 1.2% genuinely colorful pixels) -> strict achromatic neutral (S == 0f)
-        if (colorfulRatio < 0.012f || rankedBins.isEmpty()) {
+        // Pure B&W / dark-fog / pale-paper cover (< 2% genuinely colorful pixels) -> strict achromatic neutral (S == 0f)
+        if (colorfulRatio < 0.02f || rankedBins.isEmpty()) {
+            val monoAnchors = anchors.map { a ->
+                val l = rgbToHsl(a).l.coerceIn(0.05f, 0.75f)
+                hslToRgb(0f, 0f, l)
+            }
             val monoGrid = spatialGrid.map { cell ->
                 val l = rgbToHsl(cell).l.coerceIn(0.08f, 0.72f)
                 hslToRgb(0f, 0f, l)
@@ -238,7 +242,7 @@ object SmartColorExtractor {
                 isMonochrome = true,
                 playerAccentRgb = MONOCHROME_ACCENT_RGB,
                 paletteTriadRgb = MONOCHROME_DOTS_RGB,
-                radialAnchorRgbs = anchors,
+                radialAnchorRgbs = monoAnchors,
                 paletteExtendedRgb = MONOCHROME_EXTENDED_RGB,
                 spatialGrid3x3Rgb = monoGrid
             )

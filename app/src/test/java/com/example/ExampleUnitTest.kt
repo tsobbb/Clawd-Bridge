@@ -1005,27 +1005,46 @@ class ExampleUnitTest {
     }
 
     @Test
-    fun `verify Mesh Silk normalization stays bright 0_32-0_52 and monochrome 0_22-0_38`() {
+    fun `verify Mesh Silk high-contrast palette has 2 deep shadows, vivid dominant, and crisp monochrome contrast`() {
         val darkCrimson = com.example.ui.theme.ContrastGuard.normalizeMeshSilkRgb(0x28050A)
         val crimsonHsl = com.example.ui.theme.ContrastGuard.rgbToHsl(darkCrimson)
-        assertTrue("Mesh Silk Lightness must be >= 0.32 (was ${crimsonHsl.l})", crimsonHsl.l in 0.31f..0.53f)
-        assertTrue("Mesh Silk Saturation must be in 0.45..0.75 (was ${crimsonHsl.s})", crimsonHsl.s in 0.44f..0.76f)
-
-        val monoBlack = com.example.ui.theme.ContrastGuard.normalizeMeshSilkRgb(0x0A0A0A)
-        val monoHsl = com.example.ui.theme.ContrastGuard.rgbToHsl(monoBlack)
-        assertTrue("Monochrome Mesh Silk Lightness must be in 0.22..0.38 (was ${monoHsl.l})", monoHsl.l in 0.21f..0.39f)
+        assertTrue("Mesh Silk vivid dominant Lightness must be in 0.38..0.52 (was ${crimsonHsl.l})", crimsonHsl.l in 0.37f..0.53f)
+        assertTrue("Mesh Silk Saturation must be in 0.50..0.85 (was ${crimsonHsl.s})", crimsonHsl.s in 0.49f..0.86f)
 
         val meshPalette = com.example.ui.theme.computeMeshSilkPalette(
             isTrackActive = true,
-            accentColorHex = "#FCA5A5",
-            accentColorsHex = listOf("#FCA5A5", "#DC2626", "#7F1D1D"),
-            extendedColorsHex = listOf("#FCA5A5", "#DC2626", "#991B1B", "#18181B")
+            accentColorHex = "#EF4444",
+            accentColorsHex = listOf("#EF4444", "#06B6D4", "#7F1D1D"),
+            extendedColorsHex = listOf("#EF4444", "#06B6D4", "#991B1B", "#18181B")
         )
         assertEquals(6, meshPalette.size)
-        // Even dark swatch index 3 must NOT drop below visible lightness
-        val c3 = meshPalette[3]
-        val c3Rgb = ((c3.red * 255f).toInt() shl 16) or ((c3.green * 255f).toInt() shl 8) or (c3.blue * 255f).toInt()
-        assertTrue("Mesh Silk index 3 must stay visible, not pitch black", com.example.ui.theme.ContrastGuard.rgbToHsl(c3Rgb).l >= 0.20f)
+
+        fun toHsl(c: androidx.compose.ui.graphics.Color): com.example.ui.theme.ContrastGuard.Hsl {
+            val rgb = ((c.red * 255f).toInt() shl 16) or ((c.green * 255f).toInt() shl 8) or (c.blue * 255f).toInt()
+            return com.example.ui.theme.ContrastGuard.rgbToHsl(rgb)
+        }
+        val s0 = toHsl(meshPalette[0])
+        val dom = toHsl(meshPalette[1])
+        val sec = toHsl(meshPalette[2])
+        val s1 = toHsl(meshPalette[3])
+        assertTrue("Shadow anchor 0 L must be in 0.04..0.09 (was ${s0.l})", s0.l in 0.03f..0.10f)
+        assertTrue("Shadow anchor 1 L must be in 0.04..0.09 (was ${s1.l})", s1.l in 0.03f..0.10f)
+        assertTrue("Dominant L must be in 0.38..0.52 (was ${dom.l})", dom.l in 0.37f..0.53f)
+        assertTrue("Secondary L must be visible (was ${sec.l})", sec.l >= 0.34f)
+        assertTrue("Contrast spread maxL - minL must be >= 0.30", dom.l - s0.l >= 0.30f)
+
+        // Monochrome Mesh Silk stays purely achromatic with strong dark-to-silver contrast
+        val monoMesh = com.example.ui.theme.computeMeshSilkPalette(
+            isTrackActive = true,
+            accentColorHex = "#F5F5F5",
+            accentColorsHex = listOf("#525252", "#A3A3A3", "#F5F5F5"),
+            extendedColorsHex = com.example.media.SmartColorExtractor.MONOCHROME_EXTENDED_RGB.map {
+                String.format("#%06X", it)
+            }
+        )
+        val monoL = monoMesh.map { toHsl(it).l }
+        assertTrue("Monochrome silk must stay neutral (S < 0.08)", monoMesh.all { toHsl(it).s < 0.08f })
+        assertTrue("Monochrome silk contrast maxL - minL >= 0.40", (monoL.max() - monoL.min()) >= 0.40f)
     }
 
     @Test
@@ -1139,6 +1158,128 @@ class ExampleUnitTest {
         assertEquals("Готова • 500×500 • HD", hd)
         val sd = com.example.state.MediaBridgeStateHolder.formatArtworkDebugStatus(200, 200, "MediaStyle")
         assertEquals("Готова • 200×200 • SD", sd)
+    }
+
+    @Test
+    fun `verify BridgeAppUpdater deduplicates session confirmation, resets abort to UpdateAvailable, and reuses cached SHA APK`() {
+        val sampleRelease = com.example.updater.RemoteApkRelease(
+            sourceLabel = "Ветка main",
+            versionCode = 12,
+            versionName = "3.4.0",
+            apkName = "ClawdBridge.apk",
+            downloadUrl = "https://example.com/ClawdBridge.apk",
+            sizeBytes = 120_000L,
+            remoteSha = "",
+            isUpdateAvailable = true
+        )
+
+        // WaitingUserConfirmation aborted -> restores UpdateAvailable
+        val afterAbort = com.example.updater.BridgeAppUpdater.resolvePostInstallFailureState(
+            current = com.example.updater.BridgeUpdateState.WaitingUserConfirmation(sampleRelease, sessionId = 42),
+            lastRelease = sampleRelease,
+            isAborted = true,
+            errorMessage = null
+        )
+        assertTrue(afterAbort is com.example.updater.BridgeUpdateState.UpdateAvailable)
+
+        // WaitingUserConfirmation failure -> restores UpdateAvailable instead of hanging
+        val afterFail = com.example.updater.BridgeAppUpdater.resolvePostInstallFailureState(
+            current = com.example.updater.BridgeUpdateState.WaitingUserConfirmation(sampleRelease, sessionId = 42),
+            lastRelease = sampleRelease,
+            isAborted = false,
+            errorMessage = "Ошибка установки"
+        )
+        assertTrue(afterFail is com.example.updater.BridgeUpdateState.UpdateAvailable)
+
+        // InstallStatusReceiver confirmation deduplication per sessionId
+        com.example.updater.InstallStatusReceiver.clearHandledSessionsForTest()
+        assertTrue(com.example.updater.InstallStatusReceiver.markConfirmationHandledIfNew(101))
+        assertFalse(com.example.updater.InstallStatusReceiver.markConfirmationHandledIfNew(101))
+        assertTrue(com.example.updater.InstallStatusReceiver.markConfirmationHandledIfNew(102))
+        com.example.updater.InstallStatusReceiver.clearHandledSessionsForTest()
+
+        // Cached APK SHA verification skips redundant downloads
+        val tmpDir = java.nio.file.Files.createTempDirectory("updater_cache_test").toFile()
+        try {
+            val cachedFile = java.io.File(tmpDir, "ClawdBridge.apk")
+            val payload = ByteArray(120_000) { i ->
+                when (i) {
+                    0 -> 0x50.toByte()
+                    1 -> 0x4B.toByte()
+                    2 -> 0x03.toByte()
+                    3 -> 0x04.toByte()
+                    else -> (i and 0x7F).toByte()
+                }
+            }
+            cachedFile.writeBytes(payload)
+            val actualSha = com.example.updater.BridgeAppUpdater.computeGitBlobSha1(cachedFile)!!
+
+            val validHit = com.example.updater.BridgeAppUpdater.findValidCachedApkInDir(
+                tmpDir,
+                sampleRelease.copy(remoteSha = actualSha, sizeBytes = payload.size.toLong())
+            )
+            assertEquals(cachedFile.absolutePath, validHit?.absolutePath)
+
+            val wrongShaHit = com.example.updater.BridgeAppUpdater.findValidCachedApkInDir(
+                tmpDir,
+                sampleRelease.copy(remoteSha = "0000000000000000000000000000000000000000", sizeBytes = payload.size.toLong())
+            )
+            assertEquals(null, wrongShaHit)
+        } finally {
+            tmpDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `verify LyricsCatalogResolver matches SoundCloud plus-feats and comma-glued artists against Genius`() {
+        val plan = com.example.lyrics.LyricsCatalogResolver.buildQueryPlan(
+            rawArtist = "lfy,дмитрий уткин",
+            rawTitle = "fashion show + semmmyq + tachycardia"
+        )
+        assertEquals("fashion show", plan.cleanTitle)
+        assertTrue(plan.featArtists.any { it.equals("дмитрий уткин", ignoreCase = true) })
+        assertTrue(plan.featArtists.any { it.equals("semmmyq", ignoreCase = true) })
+        assertTrue(plan.featArtists.any { it.equals("tachycardia", ignoreCase = true) })
+        assertTrue(
+            "Top hypotheses must query primary & secondary artist with clean coreTitle",
+            plan.hypotheses.take(4).any {
+                it.artist.equals("дмитрий уткин", ignoreCase = true) && it.title.equals("fashion show", ignoreCase = true)
+            }
+        )
+
+        val eval = com.example.lyrics.LyricsCatalogResolver.evaluateCandidateMetadata(
+            plan = plan,
+            trackDurationSec = 0,
+            candidateArtist = "дмитрий уткин (dmitry utkin), semmmyq & tachycardia",
+            candidateTitle = "fashion show",
+            candidateDurationSec = 0,
+            requireStrictNoDurationThresholds = true
+        )
+        assertTrue("Genius multi-artist candidate must match cleanly", eval != null && eval.accepted)
+        assertEquals(1.0f, eval!!.titleSim, 0.01f)
+        assertEquals("Exact matching artist in multi-collab must receive full 1.0 similarity without penalty", 1.0f, eval.artistSim, 0.01f)
+    }
+
+    @Test
+    fun `verify SmartColorExtractor rejects noisy dark gray and misty blue-gray pixels as strict monochrome`() {
+        // Dark noisy fog (#141118) + muted cold mist (#2A2E38) with high HSL S but tiny RGB delta (< 30)
+        val darkFogPixels = IntArray(32 * 32) { idx ->
+            when (idx % 3) {
+                0 -> 0xFF141118.toInt() // dark gray with tiny violet noise (chroma = 7/255)
+                1 -> 0xFF2A2E38.toInt() // misty dark blue-gray (chroma = 14/255)
+                else -> 0xFF444852.toInt() // smoke gray (chroma = 14/255)
+            }
+        }
+        val fogRes = com.example.media.SmartColorExtractor.extractFromPixels(darkFogPixels, 32, 32)
+        assertTrue("Dark noisy fog cover must be classified strictly monochrome", fogRes.isMonochrome)
+        fogRes.paletteExtendedRgb.forEach { rgb ->
+            assertEquals("Monochrome extended swatch must have zero chroma (S=0)", 0f, com.example.media.SmartColorExtractor.rgbToHsl(rgb).s, 0.001f)
+        }
+
+        // Light misty gray (#A8ACC4: chroma = 28/255 ~ 0.11, hsvS = 28/196 ~ 0.14) must also stay monochrome
+        val mistyGrayPixels = IntArray(32 * 32) { 0xFFA8ACC4.toInt() }
+        val mistyRes = com.example.media.SmartColorExtractor.extractFromPixels(mistyGrayPixels, 32, 32)
+        assertTrue("Misty gray pixels must stay monochrome", mistyRes.isMonochrome)
     }
 }
 

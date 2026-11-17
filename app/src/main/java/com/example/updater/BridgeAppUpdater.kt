@@ -77,6 +77,11 @@ sealed class BridgeUpdateState {
         val release: RemoteApkRelease
     ) : BridgeUpdateState()
     data class Installing(val statusText: String) : BridgeUpdateState()
+    data class WaitingUserConfirmation(
+        val release: RemoteApkRelease?,
+        val sessionId: Int = -1,
+        val statusText: String = "Ожидание подтверждения системы..."
+    ) : BridgeUpdateState()
     data object Installed : BridgeUpdateState()
     data class Error(val message: String) : BridgeUpdateState()
 }
@@ -129,7 +134,10 @@ object BridgeAppUpdater {
 
     fun checkForUpdates(context: Context, isBackground: Boolean = false) {
         val cur = _state.value
-        if (cur is BridgeUpdateState.Downloading || cur is BridgeUpdateState.Installing) {
+        if (cur is BridgeUpdateState.Downloading ||
+            cur is BridgeUpdateState.Installing ||
+            cur is BridgeUpdateState.WaitingUserConfirmation
+        ) {
             return
         }
         if (activeJob?.isActive == true) return
@@ -234,28 +242,42 @@ object BridgeAppUpdater {
     }
 
     fun downloadAndInstall(context: Context, release: RemoteApkRelease) {
+        val cur = _state.value
+        if (cur is BridgeUpdateState.Downloading ||
+            cur is BridgeUpdateState.Installing ||
+            cur is BridgeUpdateState.WaitingUserConfirmation
+        ) {
+            return
+        }
         if (activeJob?.isActive == true) return
         val appCtx = context.applicationContext
+        lastReleaseMeta = release
         activeJob = ioScope.launch {
             try {
-                _state.value = BridgeUpdateState.Downloading(
-                    release = release,
-                    progress = null,
-                    downloadedBytes = 0L,
-                    totalBytes = release.sizeBytes
-                )
-                val token = PluginDownloader.getSavedToken(appCtx)
-                val apkFile = downloadApkFile(appCtx, release, token) { progress, downloaded, total ->
+                val cachedApk = findValidCachedApk(appCtx, release)
+                val apkFile = if (cachedApk != null) {
+                    Log.i(TAG, "Using valid cached APK for release ${release.remoteSha.ifBlank { release.apkName }}")
+                    cachedApk
+                } else {
                     _state.value = BridgeUpdateState.Downloading(
                         release = release,
-                        progress = progress,
-                        downloadedBytes = downloaded,
-                        totalBytes = total
+                        progress = null,
+                        downloadedBytes = 0L,
+                        totalBytes = release.sizeBytes
                     )
+                    val token = PluginDownloader.getSavedToken(appCtx)
+                    downloadApkFile(appCtx, release, token) { progress, downloaded, total ->
+                        _state.value = BridgeUpdateState.Downloading(
+                            release = release,
+                            progress = progress,
+                            downloadedBytes = downloaded,
+                            totalBytes = total
+                        )
+                    }
                 }
                 lastDownloadedApk = apkFile
                 lastReleaseMeta = release
-                installDownloadedApk(context, apkFile, release)
+                installDownloadedApk(appCtx, apkFile, release)
             } catch (e: Exception) {
                 Log.e(TAG, "APK download/install error: ${e.message}", e)
                 _state.value = BridgeUpdateState.Error(e.message ?: "Ошибка загрузки APK")
@@ -301,8 +323,11 @@ object BridgeAppUpdater {
         }
     }
 
-    internal fun onAwaitingUserConfirmation() {
-        _state.value = BridgeUpdateState.Installing("Ожидание подтверждения системы...")
+    internal fun onAwaitingUserConfirmation(sessionId: Int = -1) {
+        _state.value = BridgeUpdateState.WaitingUserConfirmation(
+            release = lastReleaseMeta,
+            sessionId = sessionId
+        )
     }
 
     internal fun onInstallSucceeded(context: Context? = null) {
@@ -314,8 +339,39 @@ object BridgeAppUpdater {
         markPendingInstallCompleted(context.applicationContext)
     }
 
+    internal fun onInstallAborted() {
+        _state.value = resolvePostInstallFailureState(
+            current = _state.value,
+            lastRelease = lastReleaseMeta,
+            isAborted = true,
+            errorMessage = null
+        )
+    }
+
     internal fun onInstallFailed(message: String) {
-        _state.value = BridgeUpdateState.Error(message)
+        _state.value = resolvePostInstallFailureState(
+            current = _state.value,
+            lastRelease = lastReleaseMeta,
+            isAborted = false,
+            errorMessage = message
+        )
+    }
+
+    internal fun resolvePostInstallFailureState(
+        current: BridgeUpdateState,
+        lastRelease: RemoteApkRelease?,
+        isAborted: Boolean,
+        errorMessage: String?
+    ): BridgeUpdateState {
+        val wasAwaitingOrInstalling = current is BridgeUpdateState.WaitingUserConfirmation ||
+            current is BridgeUpdateState.Installing
+        if ((isAborted || wasAwaitingOrInstalling) && lastRelease != null) {
+            return BridgeUpdateState.UpdateAvailable(lastRelease)
+        }
+        if (isAborted && current is BridgeUpdateState.WaitingUserConfirmation && current.release != null) {
+            return BridgeUpdateState.UpdateAvailable(current.release)
+        }
+        return BridgeUpdateState.Error(errorMessage?.takeIf { it.isNotBlank() } ?: "Ошибка установки")
     }
 
     private fun savePendingInstallSha(context: Context, sha: String) {
@@ -431,6 +487,11 @@ object BridgeAppUpdater {
             savePendingInstallSha(appCtx, effectiveSha)
 
             val packageInstaller = appCtx.packageManager.packageInstaller
+            runCatching {
+                packageInstaller.mySessions.forEach { existing ->
+                    runCatching { packageInstaller.abandonSession(existing.sessionId) }
+                }
+            }
             val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {
                 setSize(apkFile.length())
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -449,9 +510,11 @@ object BridgeAppUpdater {
                     session.fsync(out)
                 }
 
-                val callbackIntent = Intent(appCtx, InstallStatusReceiver::class.java)
+                val callbackIntent = Intent(appCtx, InstallStatusReceiver::class.java).apply {
+                    putExtra(PackageInstaller.EXTRA_SESSION_ID, sessionId)
+                }
                 val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
                 } else {
                     PendingIntent.FLAG_UPDATE_CURRENT
                 }
@@ -465,7 +528,10 @@ object BridgeAppUpdater {
                 session.commit(pendingIntent.intentSender)
                 session.close()
                 session = null
-                _state.value = BridgeUpdateState.Installing("Запуск системного установщика...")
+                _state.value = BridgeUpdateState.WaitingUserConfirmation(
+                    release = release,
+                    sessionId = sessionId
+                )
             } catch (e: Exception) {
                 runCatching { session?.abandon() }
                 runCatching { session?.close() }
@@ -802,6 +868,40 @@ object BridgeAppUpdater {
         return LocalApkFingerprint(sizeBytes = size, gitBlobSha = sha)
     }
 
+    internal fun findValidCachedApk(context: Context, release: RemoteApkRelease): File? {
+        val dir = File(context.cacheDir, UPDATES_SUBDIR)
+        return findValidCachedApkInDir(dir, release)
+    }
+
+    internal fun findValidCachedApkInDir(dir: File, release: RemoteApkRelease): File? {
+        if (!dir.exists() || !dir.isDirectory) return null
+        val safeName = PluginDownloader.sanitizeFileName(release.apkName.ifBlank { DEFAULT_APK_NAME })
+        val candidate = File(dir, safeName)
+        if (!candidate.exists() || !candidate.isFile || candidate.length() < 100_000L) return null
+        if (release.sizeBytes > 0L && candidate.length() != release.sizeBytes) return null
+        if (!hasZipMagicHeader(candidate)) return null
+
+        if (release.remoteSha.isNotBlank()) {
+            val localSha = computeGitBlobSha1(candidate) ?: return null
+            return if (localSha.equals(release.remoteSha.trim(), ignoreCase = true)) candidate else null
+        }
+        return if (release.sizeBytes > 0L && candidate.length() == release.sizeBytes) candidate else null
+    }
+
+    private fun hasZipMagicHeader(file: File): Boolean {
+        return runCatching {
+            FileInputStream(file).use { input ->
+                val header = ByteArray(4)
+                val read = input.read(header)
+                read == 4 &&
+                    header[0] == 0x50.toByte() &&
+                    header[1] == 0x4B.toByte() &&
+                    header[2] == 0x03.toByte() &&
+                    header[3] == 0x04.toByte()
+            }
+        }.getOrDefault(false)
+    }
+
     private fun downloadApkFile(
         context: Context,
         release: RemoteApkRelease,
@@ -811,11 +911,14 @@ object BridgeAppUpdater {
         val dir = File(context.cacheDir, UPDATES_SUBDIR).apply {
             if (!exists()) mkdirs()
         }
-        dir.listFiles()?.forEach { runCatching { it.delete() } }
-
         val safeName = PluginDownloader.sanitizeFileName(release.apkName.ifBlank { DEFAULT_APK_NAME })
         val partFile = File(dir, "$safeName.part")
         val targetFile = File(dir, safeName)
+        dir.listFiles()?.forEach { existing ->
+            if (existing.name != safeName) {
+                runCatching { existing.delete() }
+            }
+        }
 
         val headers = buildMap {
             put("User-Agent", "${BridgeHttpClient.GITHUB_USER_AGENT}/${BuildConfig.VERSION_NAME}")
