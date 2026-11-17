@@ -234,7 +234,7 @@ fun ClawdBridgeMainApp(openUpdateSheetTrigger: Int = 0) {
         playerStyleConfig.backgroundMode != com.example.state.PlayerBackgroundMode.GRADIENT
 
     val livingPalette = rememberLivingPaletteState(
-        liveState = if (isFullscreenPlayerOpen && playerUiState.hasMedia) playerUiState else liveState,
+        liveState = if (playerUiState.hasMedia) playerUiState else liveState,
         artworkBitmap = artworkBitmap,
         dynamicBackgroundEnabled = dynamicBackgroundEnabled,
         backgroundStyle = backgroundStyle,

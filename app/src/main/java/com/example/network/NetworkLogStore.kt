@@ -73,9 +73,11 @@ data class GitHubRateLimitStatus(
 object HostCooldownGuard {
 
     const val DEFAULT_COOLDOWN_MS = 5 * 60 * 1000L
+    const val SOFT_NETWORK_COOLDOWN_MS = 3 * 60 * 1000L
     private const val MAX_COOLDOWN_MS = 60 * 60 * 1000L
 
     private val cooldowns = ConcurrentHashMap<String, CooldownInfo>()
+    private val timeoutStreaks = ConcurrentHashMap<String, Int>()
 
     @Volatile
     private var lastGitHubRateLimit: GitHubRateLimitStatus? = null
@@ -140,6 +142,9 @@ object HostCooldownGuard {
         rateLimitResetHeader: String?,
         nowMs: Long = System.currentTimeMillis()
     ) {
+        if (httpCode > 0) {
+            timeoutStreaks.remove(category.cooldownBucket)
+        }
         val remaining = rateLimitRemainingHeader?.trim()?.toIntOrNull()
         val resetEpochSec = rateLimitResetHeader?.trim()?.toLongOrNull()
         val untilMs = computeCooldownUntilMs(
@@ -173,10 +178,43 @@ object HostCooldownGuard {
         }
     }
 
+    fun recordNetworkFailure(
+        category: NetworkCategory,
+        errorSimpleName: String,
+        nowMs: Long = System.currentTimeMillis()
+    ): Long? {
+        val normalized = errorSimpleName.trim()
+        val isImmediateSoftBan = normalized.contains("UnknownHostException", ignoreCase = true) ||
+            normalized.contains("StreamResetException", ignoreCase = true)
+        val isTimeout = normalized.contains("SocketTimeoutException", ignoreCase = true) ||
+            normalized.contains("InterruptedIOException", ignoreCase = true)
+
+        val shouldCooldown = when {
+            isImmediateSoftBan -> true
+            isTimeout -> {
+                val nextCount = (timeoutStreaks[category.cooldownBucket] ?: 0) + 1
+                timeoutStreaks[category.cooldownBucket] = nextCount
+                nextCount >= 2
+            }
+            else -> false
+        }
+
+        if (!shouldCooldown) return null
+        timeoutStreaks.remove(category.cooldownBucket)
+        val untilMs = nowMs + SOFT_NETWORK_COOLDOWN_MS
+        cooldowns[category.cooldownBucket] = CooldownInfo(
+            bucket = category.cooldownBucket,
+            untilMs = untilMs,
+            reasonCode = -1
+        )
+        return untilMs
+    }
+
     fun getLastGitHubRateLimit(): GitHubRateLimitStatus? = lastGitHubRateLimit
 
     fun clearAll() {
         cooldowns.clear()
+        timeoutStreaks.clear()
         lastGitHubRateLimit = null
     }
 }

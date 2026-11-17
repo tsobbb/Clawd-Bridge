@@ -416,9 +416,9 @@ object MediaBridgeStateHolder {
         return calculatedPosMs
     }
 
-    internal fun formatArtworkDebugStatus(widthPx: Int, heightPx: Int, note: String): String {
+    internal fun formatArtworkDebugStatus(widthPx: Int, heightPx: Int, @Suppress("UNUSED_PARAMETER") note: String = ""): String {
         val quality = if (minOf(widthPx, heightPx) >= ArtworkExtractor.HD_QUALITY_MIN_PX) "HD" else "SD"
-        return "Готова • ${widthPx}×${heightPx} • $quality ($note)"
+        return "Готова • ${widthPx}×${heightPx} • $quality"
     }
 
     fun seekToPosition(positionMs: Long) {

@@ -595,20 +595,18 @@ object LyricsCatalogResolver {
 
         val hasSyncedAfterCanonical = allCandidates.any { it.synced && it.lines.size >= MIN_SYNCED_LINES }
 
-        // Phase 2: Plain Fallback (Genius + Lyrics.ovh) ONLY if still NO synced LRC exists
+        // Phase 2: Plain Fallback — Genius first, Lyrics.ovh strictly as last resort when candidates.isEmpty()
         if (!hasSyncedAfterCanonical) {
-            val plainPool = Executors.newFixedThreadPool(2)
-            try {
-                val fGenius = plainPool.submit(Callable {
-                    fetchGeniusCandidates(plan, trackDurationSec, statuses)
-                })
-                val fOvh = plainPool.submit(Callable {
+            val geniusCandidates = runCatching {
+                fetchGeniusCandidates(plan, trackDurationSec, statuses)
+            }.getOrDefault(emptyList())
+            allCandidates.addAll(geniusCandidates)
+
+            if (allCandidates.isEmpty()) {
+                val ovhCandidates = runCatching {
                     fetchLyricsOvhCandidates(plan, trackDurationSec, statuses)
-                })
-                runCatching { fGenius.get(7, TimeUnit.SECONDS) }.getOrNull()?.let { allCandidates.addAll(it) }
-                runCatching { fOvh.get(6, TimeUnit.SECONDS) }.getOrNull()?.let { allCandidates.addAll(it) }
-            } finally {
-                plainPool.shutdownNow()
+                }.getOrDefault(emptyList())
+                allCandidates.addAll(ovhCandidates)
             }
         }
 
@@ -1325,7 +1323,10 @@ object LyricsCatalogResolver {
                             return collected
                         }
                         val html = pageRes.body ?: continue
-                        val plain = extractGeniusHtmlLyrics(html)
+                        val plain = extractGeniusHtmlLyrics(
+                            html = html,
+                            expectedTitle = hitTitle.ifBlank { eval.bestHypothesis.title }
+                        )
                         if (plain.isNotBlank()) {
                             collected.add(
                                 LyricsCandidate(
@@ -1384,7 +1385,7 @@ object LyricsCatalogResolver {
                     url = "https://api.lyrics.ovh/v1/$a/$t",
                     useCatalogClient = true,
                     maxRetries = 0,
-                    customCallTimeoutMs = 4500L
+                    customCallTimeoutMs = 3000L
                 )
                 if (res.isCooldown || res.httpCode == 403 || res.httpCode == 429) {
                     statuses["Lyrics.ovh"] = res.errorLabel ?: "HTTP ${res.httpCode}"
@@ -1492,7 +1493,7 @@ object LyricsCatalogResolver {
         }
     }
 
-    internal fun extractGeniusHtmlLyrics(html: String): String {
+    internal fun extractGeniusHtmlLyrics(html: String, expectedTitle: String = ""): String {
         val markerRegex = Regex("""<div\b[^>]*data-lyrics-container\s*=\s*["']true["'][^>]*>""", RegexOption.IGNORE_CASE)
         val openDivRegex = Regex("""<div\b[^>]*>""", RegexOption.IGNORE_CASE)
         val closeDivRegex = Regex("""</div\s*>""", RegexOption.IGNORE_CASE)
@@ -1537,9 +1538,72 @@ object LyricsCatalogResolver {
             .replace(Regex("""<[^>]+>"""), "")
 
         val decoded = decodeHtmlEntities(combined)
-        return decoded
+        return cleanGeniusLyricsText(decoded, expectedTitle)
+    }
+
+    internal fun cleanGeniusLyricsText(rawText: String, expectedTitle: String = ""): String {
+        val contributorsRegex = Regex("""^\s*\d+\s+Contributors?.*$""", RegexOption.IGNORE_CASE)
+        val geniusHeaderNoiseRegex = Regex("""^\s*(?:Translations|Read More|About|Genius Lyrics)\s*$""", RegexOption.IGNORE_CASE)
+        val titleLyricsHeaderRegex = Regex("""^.{1,90}\s+Lyrics\s*$""")
+        val youMightAlsoLikeRegex = Regex("""(?i)\s*You might also like\s*$""")
+        val embedTailRegex = Regex("""\s*\d*Embed\s*$""", RegexOption.IGNORE_CASE)
+
+        val cleanedLines = rawText
+            .replace("\r\n", "\n")
             .lines()
             .map { it.trimEnd() }
+            .toMutableList()
+
+        // Strip leading header artifacts ("<Title> Lyrics", "12 Contributors", "Translations", "Read More")
+        val normalizedExpected = normalizeForMatch(stripMetadataJunk(expectedTitle))
+        var headerProbe = 0
+        while (cleanedLines.isNotEmpty() && headerProbe < 5) {
+            val first = cleanedLines.first().trim()
+            if (first.isEmpty()) {
+                cleanedLines.removeAt(0)
+                continue
+            }
+            val normFirst = normalizeForMatch(first)
+            val matchesExpectedHeader = normalizedExpected.isNotBlank() &&
+                (normFirst == "$normalizedExpected lyrics" || (normFirst.endsWith(" lyrics") && normFirst.contains(normalizedExpected)))
+            val isGeniusBanner = matchesExpectedHeader ||
+                contributorsRegex.matches(first) ||
+                geniusHeaderNoiseRegex.matches(first) ||
+                (headerProbe == 0 && titleLyricsHeaderRegex.matches(first))
+            if (isGeniusBanner) {
+                cleanedLines.removeAt(0)
+                headerProbe++
+            } else {
+                break
+            }
+        }
+
+        // Remove inline/trailing "You might also like" markers
+        val filtered = cleanedLines.mapNotNull { line ->
+            val stripped = line.replace(youMightAlsoLikeRegex, "").trimEnd()
+            if (stripped.equals("You might also like", ignoreCase = true)) null else stripped
+        }.toMutableList()
+
+        // Trim trailing blank lines and Genius "...Embed" tail
+        while (filtered.isNotEmpty()) {
+            val last = filtered.last().trim()
+            if (last.isEmpty()) {
+                filtered.removeAt(filtered.lastIndex)
+                continue
+            }
+            val withoutEmbed = last.replace(embedTailRegex, "").replace(youMightAlsoLikeRegex, "").trimEnd()
+            if (withoutEmbed != last) {
+                if (withoutEmbed.isEmpty()) {
+                    filtered.removeAt(filtered.lastIndex)
+                } else {
+                    filtered[filtered.lastIndex] = withoutEmbed
+                }
+            } else {
+                break
+            }
+        }
+
+        return filtered
             .joinToString("\n")
             .replace(Regex("""\n{3,}"""), "\n\n")
             .trim()

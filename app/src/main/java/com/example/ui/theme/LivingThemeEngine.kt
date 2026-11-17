@@ -140,6 +140,20 @@ object ContrastGuard {
         return hslToRgb(hsl.h, s, l)
     }
 
+    fun normalizeMeshSilkRgb(rgb: Int): Int {
+        val hsl = rgbToHsl(rgb)
+        if (hsl.s < 0.08f) {
+            return hslToRgb(0f, 0f, hsl.l.coerceIn(0.22f, 0.38f))
+        }
+        val isWarmCream = hsl.h in 20f..55f && hsl.s < 0.34f && hsl.l > 0.65f
+        if (isWarmCream) {
+            return hslToRgb(0f, 0f, 0.34f)
+        }
+        val s = hsl.s.coerceIn(0.45f, 0.75f)
+        val l = hsl.l.coerceIn(0.32f, 0.52f)
+        return hslToRgb(hsl.h, s, l)
+    }
+
     fun normalizePlayerAccentRgb(rgb: Int): Int {
         val hsl = rgbToHsl(rgb)
         if (hsl.s < 0.08f) {
@@ -199,10 +213,12 @@ fun rememberLivingPaletteState(
     val lifecycleState by lifecycleOwner.lifecycle.currentStateFlow.collectAsStateWithLifecycle()
 
     val isInForeground = lifecycleState.isAtLeast(Lifecycle.State.STARTED)
-    val isTrackActive = liveState.hasMedia && liveState.isPlaying
+    // Strictly bound to track presence (NOT isPlaying) so Pause/Play never jumps PlayerAccent or backdrop colors
+    val isTrackActive = liveState.hasMedia
+    val trackKey = "${liveState.player}|${liveState.artist}|${liveState.title}"
 
     // 1. UI accents (PlayerAccent + 3 real cover dots + CardTint)
-    val uiTargets = remember(liveState.accentColorHex, liveState.accentColorsHex, isTrackActive) {
+    val uiTargets = remember(trackKey, isTrackActive, liveState.accentColorHex, liveState.accentColorsHex) {
         if (!isTrackActive) {
             listOf(
                 MintCta,
@@ -237,7 +253,7 @@ fun rememberLivingPaletteState(
     val cardTint by animateColorAsState(uiTargets[4], crossfadeSpec, label = "card_tint")
 
     // 2. Extended 6-color palette + 3x3 grid color targets
-    val targetClouds = remember(liveState.accentColorHex, liveState.accentColorsHex, isTrackActive) {
+    val targetClouds = remember(trackKey, isTrackActive, liveState.accentColorHex, liveState.accentColorsHex) {
         computeCloudPalette(
             isTrackActive = isTrackActive,
             accentColorHex = liveState.accentColorHex,
@@ -246,12 +262,13 @@ fun rememberLivingPaletteState(
     }
 
     val targetExtended6 = remember(
+        trackKey,
+        isTrackActive,
         liveState.accentColorHex,
         liveState.accentColorsHex,
-        liveState.extendedColorsHex,
-        isTrackActive
+        liveState.extendedColorsHex
     ) {
-        computeExtendedSixPalette(
+        computeMeshSilkPalette(
             isTrackActive = isTrackActive,
             accentColorHex = liveState.accentColorHex,
             accentColorsHex = liveState.accentColorsHex,
@@ -260,9 +277,10 @@ fun rememberLivingPaletteState(
     }
 
     val targetGrid9 = remember(
+        trackKey,
+        isTrackActive,
         liveState.gridColorsHex,
-        targetExtended6,
-        isTrackActive
+        targetExtended6
     ) {
         computeGridNinePalette(
             isTrackActive = isTrackActive,
@@ -271,7 +289,7 @@ fun rememberLivingPaletteState(
         )
     }
 
-    val isBrightCover = remember(liveState.extendedColorsHex, liveState.accentColorsHex, isTrackActive) {
+    val isBrightCover = remember(trackKey, isTrackActive, liveState.extendedColorsHex, liveState.accentColorsHex) {
         if (!isTrackActive) false
         else {
             val samples = (liveState.extendedColorsHex.ifEmpty { liveState.accentColorsHex })
@@ -442,7 +460,7 @@ internal fun computeCloudPalette(
     return listOf(c1, c2, c3, c4)
 }
 
-internal fun computeExtendedSixPalette(
+internal fun computeMeshSilkPalette(
     isTrackActive: Boolean,
     accentColorHex: String,
     accentColorsHex: List<String>,
@@ -450,12 +468,12 @@ internal fun computeExtendedSixPalette(
 ): List<Color> {
     if (!isTrackActive) {
         return listOf(
-            Color(0xFF0E4D43),
-            Color(0xFF192B56),
-            Color(0xFF113F5C),
-            Color(0xFF28204E),
-            Color(0xFF0A2A2D),
-            Color(0xFF2B6B62)
+            Color(0xFF1F6E62),
+            Color(0xFF284887),
+            Color(0xFF235D82),
+            Color(0xFF42367A),
+            Color(0xFF195256),
+            Color(0xFF397F76)
         )
     }
 
@@ -465,25 +483,40 @@ internal fun computeExtendedSixPalette(
     val isMono = parsed.all { ContrastGuard.rgbToHsl(it).s < 0.08f }
 
     if (isMono) {
-        return SmartColorExtractor.MONOCHROME_EXTENDED_RGB.map { it.toComposeColor() }
+        return listOf(
+            Color(0xFF38383C),
+            Color(0xFF4E4E54),
+            Color(0xFF424248),
+            Color(0xFF5D5D64),
+            Color(0xFF3A3A3F),
+            Color(0xFF616168)
+        )
     }
 
-    val normalized = parsed.take(6).mapIndexed { index, raw ->
-        when (index) {
-            3 -> ContrastGuard.normalizeAmbientCloudRgb(raw, targetMinL = 0.20f, targetMaxL = 0.32f).toComposeColor()
-            4 -> ContrastGuard.normalizeAmbientCloudRgb(raw, targetMinL = 0.42f, targetMaxL = 0.58f).toComposeColor()
-            else -> ContrastGuard.normalizeAmbientCloudRgb(raw, targetMinL = 0.32f, targetMaxL = 0.54f).toComposeColor()
-        }
+    val normalized = parsed.take(6).map { raw ->
+        ContrastGuard.normalizeMeshSilkRgb(raw).toComposeColor()
     }.toMutableList()
 
-    val fallbackClouds = computeCloudPalette(true, accentColorHex, accentColorsHex)
+    val fallbackSeed = ContrastGuard.normalizeMeshSilkRgb(primaryRaw).toComposeColor()
     var idx = 0
     while (normalized.size < 6) {
-        normalized.add(fallbackClouds[idx % fallbackClouds.size])
+        normalized.add(normalized.getOrElse(idx % normalized.size.coerceAtLeast(1)) { fallbackSeed })
         idx++
     }
     return normalized
 }
+
+internal fun computeExtendedSixPalette(
+    isTrackActive: Boolean,
+    accentColorHex: String,
+    accentColorsHex: List<String>,
+    extendedColorsHex: List<String>
+): List<Color> = computeMeshSilkPalette(
+    isTrackActive = isTrackActive,
+    accentColorHex = accentColorHex,
+    accentColorsHex = accentColorsHex,
+    extendedColorsHex = extendedColorsHex
+)
 
 internal fun computeGridNinePalette(
     isTrackActive: Boolean,
@@ -537,17 +570,25 @@ half4 main(float2 fragCoord) {
     float2 q = warp(p, t);
     float2 r = warp(q * 1.15 + float2(1.4, -0.9), -t * 0.8);
 
-    float w0 = 1.0 - smoothstep(0.0, 1.35, length(r - float2(-0.55, -0.50)));
-    float w1 = 1.0 - smoothstep(0.0, 1.40, length(r - float2(0.60, -0.35)));
-    float w2 = 1.0 - smoothstep(0.0, 1.45, length(r - float2(-0.35, 0.65)));
-    float w3 = 1.0 - smoothstep(0.0, 1.35, length(r - float2(0.55, 0.55)));
+    float d0 = length(r - float2(-0.55, -0.50));
+    float d1 = length(r - float2(0.60, -0.35));
+    float d2 = length(r - float2(-0.35, 0.65));
+    float d3 = length(r - float2(0.55, 0.55));
 
-    float total = w0 + w1 + w2 + w3 + 0.35;
-    float3 obsidian = float3(0.024, 0.027, 0.035);
-    float3 mesh = (uColor0 * w0 + uColor1 * w1 + uColor2 * w2 + uColor3 * w3 + obsidian * 0.35) / total;
+    float w0 = exp(-d0 * d0 * 1.10);
+    float w1 = exp(-d1 * d1 * 1.10);
+    float w2 = exp(-d2 * d2 * 1.10);
+    float w3 = exp(-d3 * d3 * 1.10);
+
+    float total = max(w0 + w1 + w2 + w3, 0.0001);
+    float3 mesh = (uColor0 * w0 + uColor1 * w1 + uColor2 * w2 + uColor3 * w3) / total;
 
     float fold = 0.5 + 0.5 * sin(r.x * 2.4 + r.y * 2.1 + t * 0.5);
-    mesh = mix(mesh, uColor2 * 0.85 + uColor0 * 0.15, fold * 0.14);
+    mesh = mix(mesh, uColor2 * 0.80 + uColor0 * 0.20, fold * 0.16);
+
+    // Subtle edge depth without crushing waves into black
+    float edgeFade = smoothstep(0.0, 1.0, uv.y) * 0.18;
+    mesh = mix(mesh, mesh * 0.72, edgeFade);
 
     return half4(clamp(mesh, float3(0.0), float3(1.0)), 1.0);
 }
@@ -590,7 +631,6 @@ private fun HypnoticMeshSilkBackdrop(
     val c3State = ext[3]
     val c4State = ext[4]
     val tState = palette.bgTimeSecondsState
-    val intensity = if (palette.isTrackActive) 1.0f else 0.82f
 
     var shaderFailed by remember { mutableStateOf(false) }
     val runtimeShader = remember {
@@ -602,16 +642,6 @@ private fun HypnoticMeshSilkBackdrop(
     }
     val shaderBrush = remember(runtimeShader) {
         runtimeShader?.let { ShaderBrush(it) }
-    }
-
-    val veilBrush = remember {
-        Brush.verticalGradient(
-            colors = listOf(
-                Color(0x38060709),
-                Color(0x20060709),
-                Color(0x60060709)
-            )
-        )
     }
 
     BoxWithConstraints(
@@ -637,14 +667,10 @@ private fun HypnoticMeshSilkBackdrop(
             val h = size.height
             if (w <= 0f || h <= 0f) return@Canvas
 
-            val primaryGlow = lerp(Color(0xFF060709), c0State.value, 0.80f * intensity)
-            val darkShadow = lerp(Color(0xFF060709), c3State.value, 0.45f)
-            val secondaryGlow = lerp(Color(0xFF060709), c1State.value, 0.74f * intensity)
-            val highlightGlow = lerp(
-                Color(0xFF060709),
-                lerp(c2State.value, c4State.value, 0.35f),
-                0.70f * intensity
-            )
+            val primaryGlow = c0State.value
+            val secondaryGlow = c1State.value
+            val waveGlow = c2State.value
+            val highlightGlow = lerp(c3State.value, c4State.value, 0.45f)
             val t = tState.value
 
             val shader = if (!shaderFailed) runtimeShader else null
@@ -654,8 +680,8 @@ private fun HypnoticMeshSilkBackdrop(
                     shader.setFloatUniform("uResolution", w, h)
                     shader.setFloatUniform("uTime", t)
                     shader.setFloatUniform("uColor0", primaryGlow.red, primaryGlow.green, primaryGlow.blue)
-                    shader.setFloatUniform("uColor1", darkShadow.red, darkShadow.green, darkShadow.blue)
-                    shader.setFloatUniform("uColor2", secondaryGlow.red, secondaryGlow.green, secondaryGlow.blue)
+                    shader.setFloatUniform("uColor1", secondaryGlow.red, secondaryGlow.green, secondaryGlow.blue)
+                    shader.setFloatUniform("uColor2", waveGlow.red, waveGlow.green, waveGlow.blue)
                     shader.setFloatUniform("uColor3", highlightGlow.red, highlightGlow.green, highlightGlow.blue)
                     drawRect(brush = brush)
                     true
@@ -669,23 +695,23 @@ private fun HypnoticMeshSilkBackdrop(
             // Crash-proof Canvas silk mesh fallback (used on API < 33 or if a driver rejects AGSL)
             drawRect(
                 brush = Brush.linearGradient(
-                    colors = listOf(primaryGlow, darkShadow, secondaryGlow)
+                    colors = listOf(primaryGlow, waveGlow, secondaryGlow)
                 )
             )
-            val radius = max(w, h) * 0.85f
+            val radius = max(w, h) * 0.90f
             drawSoftCloud(
                 center = Offset(w * (0.28f + 0.22f * sin(t * 0.35f)), h * (0.26f + 0.16f * cos(t * 0.28f))),
                 radius = radius,
                 color = primaryGlow,
-                alpha = 0.72f,
-                scaleX = 1.2f,
+                alpha = 0.85f,
+                scaleX = 1.25f,
                 scaleY = 0.95f
             )
             drawSoftCloud(
                 center = Offset(w * (0.74f - 0.20f * cos(t * 0.31f)), h * (0.48f + 0.18f * sin(t * 0.24f))),
                 radius = radius,
                 color = secondaryGlow,
-                alpha = 0.68f,
+                alpha = 0.82f,
                 scaleX = 0.95f,
                 scaleY = 1.25f
             )
@@ -693,17 +719,11 @@ private fun HypnoticMeshSilkBackdrop(
                 center = Offset(w * (0.45f + 0.24f * sin(t * 0.27f + 1.4f)), h * (0.78f - 0.14f * cos(t * 0.33f))),
                 radius = radius,
                 color = highlightGlow,
-                alpha = 0.62f,
-                scaleX = 1.15f,
+                alpha = 0.78f,
+                scaleX = 1.2f,
                 scaleY = 1.05f
             )
         }
-
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(veilBrush)
-        )
     }
 }
 

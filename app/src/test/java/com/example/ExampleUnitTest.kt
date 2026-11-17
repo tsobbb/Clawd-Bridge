@@ -1003,6 +1003,143 @@ class ExampleUnitTest {
         com.example.network.NetworkLogStore.clear()
         com.example.network.HostCooldownGuard.clearAll()
     }
+
+    @Test
+    fun `verify Mesh Silk normalization stays bright 0_32-0_52 and monochrome 0_22-0_38`() {
+        val darkCrimson = com.example.ui.theme.ContrastGuard.normalizeMeshSilkRgb(0x28050A)
+        val crimsonHsl = com.example.ui.theme.ContrastGuard.rgbToHsl(darkCrimson)
+        assertTrue("Mesh Silk Lightness must be >= 0.32 (was ${crimsonHsl.l})", crimsonHsl.l in 0.31f..0.53f)
+        assertTrue("Mesh Silk Saturation must be in 0.45..0.75 (was ${crimsonHsl.s})", crimsonHsl.s in 0.44f..0.76f)
+
+        val monoBlack = com.example.ui.theme.ContrastGuard.normalizeMeshSilkRgb(0x0A0A0A)
+        val monoHsl = com.example.ui.theme.ContrastGuard.rgbToHsl(monoBlack)
+        assertTrue("Monochrome Mesh Silk Lightness must be in 0.22..0.38 (was ${monoHsl.l})", monoHsl.l in 0.21f..0.39f)
+
+        val meshPalette = com.example.ui.theme.computeMeshSilkPalette(
+            isTrackActive = true,
+            accentColorHex = "#FCA5A5",
+            accentColorsHex = listOf("#FCA5A5", "#DC2626", "#7F1D1D"),
+            extendedColorsHex = listOf("#FCA5A5", "#DC2626", "#991B1B", "#18181B")
+        )
+        assertEquals(6, meshPalette.size)
+        // Even dark swatch index 3 must NOT drop below visible lightness
+        val c3 = meshPalette[3]
+        val c3Rgb = ((c3.red * 255f).toInt() shl 16) or ((c3.green * 255f).toInt() shl 8) or (c3.blue * 255f).toInt()
+        assertTrue("Mesh Silk index 3 must stay visible, not pitch black", com.example.ui.theme.ContrastGuard.rgbToHsl(c3Rgb).l >= 0.20f)
+    }
+
+    @Test
+    fun `verify computeWordAlphasForLine smoothstep illuminates 100 percent of words before line end`() {
+        val longLine = com.example.lyrics.LyricsLine(
+            timeMs = 10_000L,
+            text = "First second third fourth fifth"
+        )
+        // Next line 10s away: singingDur caps at 5500ms -> by 15_500ms ALL words must reach 1.0f
+        val atStart = com.example.ui.components.computeWordAlphasForLine(longLine, 20_000L, 10_000L, 180_000L)
+        assertEquals(5, atStart.size)
+        assertEquals(0f, atStart.last(), 1e-4f)
+
+        val atHalf = com.example.ui.components.computeWordAlphasForLine(longLine, 20_000L, 12_750L, 180_000L)
+        assertTrue("First word must be fully lit by midpoint", atHalf.first() > 0.99f)
+
+        val atComplete = com.example.ui.components.computeWordAlphasForLine(longLine, 20_000L, 15_500L, 180_000L)
+        assertTrue("All words must reach 1.0f (no 70 percent cutoff): $atComplete", atComplete.all { it >= 0.999f })
+
+        // Fast 2000ms line: rawDur=2000, singingDur=1700ms -> fully lit by 11_700ms (85 percent)
+        val fastLine = com.example.lyrics.LyricsLine(timeMs = 10_000L, text = "Quick short bar")
+        val fastEnd = com.example.ui.components.computeWordAlphasForLine(fastLine, 12_000L, 11_750L, 180_000L)
+        assertTrue("Fast line words must all hit 1.0f without artificial 3.5s minimum floor", fastEnd.all { it >= 0.999f })
+    }
+
+    @Test
+    fun `verify HostCooldownGuard 3-minute soft cooldown on UnknownHost, StreamReset, and 2 timeouts`() {
+        com.example.network.HostCooldownGuard.clearAll()
+        val now = 1_700_000_000_000L
+
+        // UnknownHostException triggers immediate 3-min cooldown on KuGou
+        val kugouUntil = com.example.network.HostCooldownGuard.recordNetworkFailure(
+            category = com.example.network.NetworkCategory.KUGOU,
+            errorSimpleName = "UnknownHostException",
+            nowMs = now
+        )
+        assertEquals(now + com.example.network.HostCooldownGuard.SOFT_NETWORK_COOLDOWN_MS, kugouUntil)
+        assertTrue(com.example.network.HostCooldownGuard.checkCooldown("kugou", now + 60_000L) != null)
+        assertEquals(null, com.example.network.HostCooldownGuard.checkCooldown("kugou", now + 180_001L))
+
+        // StreamResetException triggers immediate 3-min cooldown
+        val neteaseUntil = com.example.network.HostCooldownGuard.recordNetworkFailure(
+            category = com.example.network.NetworkCategory.NETEASE,
+            errorSimpleName = "StreamResetException",
+            nowMs = now
+        )
+        assertEquals(now + com.example.network.HostCooldownGuard.SOFT_NETWORK_COOLDOWN_MS, neteaseUntil)
+
+        // Single timeout does NOT trigger cooldown, 2nd consecutive timeout DOES, HTTP 200 resets streak
+        val ovhTimeout1 = com.example.network.HostCooldownGuard.recordNetworkFailure(
+            category = com.example.network.NetworkCategory.LYRICS_OVH,
+            errorSimpleName = "SocketTimeoutException",
+            nowMs = now
+        )
+        assertEquals(null, ovhTimeout1)
+
+        // Reset via HTTP 200, then fail once again -> still no cooldown yet
+        com.example.network.HostCooldownGuard.recordHttpOutcome(
+            category = com.example.network.NetworkCategory.LYRICS_OVH,
+            httpCode = 200,
+            retryAfterHeader = null,
+            rateLimitRemainingHeader = null,
+            rateLimitResetHeader = null,
+            nowMs = now + 100L
+        )
+        val ovhAfterReset = com.example.network.HostCooldownGuard.recordNetworkFailure(
+            category = com.example.network.NetworkCategory.LYRICS_OVH,
+            errorSimpleName = "SocketTimeoutException",
+            nowMs = now + 200L
+        )
+        assertEquals(null, ovhAfterReset)
+
+        // Second consecutive timeout triggers 3-min cooldown
+        val ovhTimeout2 = com.example.network.HostCooldownGuard.recordNetworkFailure(
+            category = com.example.network.NetworkCategory.LYRICS_OVH,
+            errorSimpleName = "SocketTimeoutException",
+            nowMs = now + 300L
+        )
+        assertEquals(now + 300L + com.example.network.HostCooldownGuard.SOFT_NETWORK_COOLDOWN_MS, ovhTimeout2)
+
+        com.example.network.HostCooldownGuard.clearAll()
+    }
+
+    @Test
+    fun `verify Genius cleaner strips title header, contributors, You might also like, and Embed tail`() {
+        val dirtyHtml = """
+            <html><body>
+              <div data-lyrics-container="true">
+                MAGICIAN Lyrics<br/>
+                14 Contributors<br/>
+                [Chorus]<br/>
+                Watch me disappear<br/>
+                You might also like<br/>
+                Final line in verse<br/>
+                27Embed
+              </div>
+            </body></html>
+        """.trimIndent()
+        val cleaned = com.example.lyrics.LyricsCatalogResolver.extractGeniusHtmlLyrics(dirtyHtml, "MAGICIAN")
+        assertFalse("Must strip '<Title> Lyrics' line", cleaned.contains("MAGICIAN Lyrics"))
+        assertFalse("Must strip Contributors header", cleaned.contains("Contributors"))
+        assertFalse("Must strip You might also like", cleaned.contains("You might also like"))
+        assertFalse("Must strip Embed suffix", cleaned.contains("Embed"))
+        assertTrue(cleaned.contains("[Chorus]"))
+        assertTrue(cleaned.contains("Final line in verse"))
+    }
+
+    @Test
+    fun `verify formatArtworkDebugStatus omits technical uri note suffix`() {
+        val hd = com.example.state.MediaBridgeStateHolder.formatArtworkDebugStatus(500, 500, "uri:content ok")
+        assertEquals("Готова • 500×500 • HD", hd)
+        val sd = com.example.state.MediaBridgeStateHolder.formatArtworkDebugStatus(200, 200, "MediaStyle")
+        assertEquals("Готова • 200×200 • SD", sd)
+    }
 }
 
 

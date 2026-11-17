@@ -12,6 +12,7 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
@@ -35,6 +36,7 @@ import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -110,6 +112,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.MotionDurationScale
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
@@ -239,11 +242,64 @@ internal fun tokenizeLyricWords(text: String): List<LyricTextToken> {
     }.toList()
 }
 
+private fun smoothstepHighlight(edge0: Float, edge1: Float, x: Float): Float {
+    val span = (edge1 - edge0).coerceAtLeast(1e-4f)
+    val t = ((x - edge0) / span).coerceIn(0f, 1f)
+    return t * t * (3f - 2f * t)
+}
+
+/**
+ * Computes per-word illumination factors [0f..1f] for an active line using smoothstep interpolation.
+ * - Uses rawDur = (nextLineTimeMs - line.timeMs).coerceAtLeast(300L) and singingDur = (rawDur * 0.85f).coerceAtMost(5500f).
+ * - Guarantees 100% of the line reaches 1.0f cleanly with soft 4% overlap between adjacent words.
+ */
+internal fun computeWordAlphasForLine(
+    line: LyricsLine,
+    nextLineTimeMs: Long,
+    positionMs: Long,
+    durationMs: Long = 0L
+): List<Float> {
+    val clampedPos = if (durationMs > 0L) positionMs.coerceIn(0L, durationMs) else positionMs.coerceAtLeast(0L)
+    val rawDur = (nextLineTimeMs - line.timeMs).coerceAtLeast(300L)
+    val singingDur = (rawDur * 0.85f).coerceAtMost(5500f).coerceAtLeast(250f)
+    val lineProgress = ((clampedPos - line.timeMs).toFloat() / singingDur).coerceIn(0f, 1f)
+
+    if (line.words.isNotEmpty()) {
+        val words = line.words
+        val effectiveEndMs = maxOf(
+            line.timeMs + singingDur.toLong(),
+            words.last().startMs + 250L
+        ).coerceAtMost(nextLineTimeMs.coerceAtLeast(line.timeMs + 300L))
+        val spanMs = (effectiveEndMs - line.timeMs).coerceAtLeast(250L).toFloat()
+        val verbatimProgress = ((clampedPos - line.timeMs).toFloat() / spanMs).coerceIn(0f, 1f)
+        return List(words.size) { i ->
+            val wStart = words[i].startMs
+            val wEnd = words.getOrNull(i + 1)?.startMs ?: effectiveEndMs
+            val startFrac = ((wStart - line.timeMs).toFloat() / spanMs).coerceIn(0f, 0.96f)
+            val endFrac = ((wEnd - line.timeMs).toFloat() / spanMs).coerceIn(startFrac + 0.03f, 1f)
+            smoothstepHighlight(startFrac - 0.04f, endFrac, verbatimProgress)
+        }
+    }
+
+    val wordTokens = tokenizeLyricWords(line.text).filter { it.isWord }
+    if (wordTokens.isEmpty()) return emptyList()
+
+    val weights = FloatArray(wordTokens.size) { idx ->
+        (wordTokens[idx].text.length.coerceAtLeast(1) + 0.5f)
+    }
+    val totalWeight = weights.sum().coerceAtLeast(1f)
+    var acc = 0f
+    return List(wordTokens.size) { i ->
+        val w = weights[i]
+        val startFrac = acc / totalWeight
+        val endFrac = (acc + w) / totalWeight
+        acc += w
+        smoothstepHighlight(startFrac - 0.04f, endFrac, lineProgress)
+    }
+}
+
 /**
  * Computes active word ordinal and continuous transition fraction [0f..1f] inside an active line.
- * - For WORD_SYNCED lines (`line.words.isNotEmpty()`), uses authentic `<mm:ss.xx>` word timestamps.
- * - For LINE_SYNCED lines (`line.words.isEmpty()`), interpolates smoothly across word tokens
- *   weighted by character length over `[line.timeMs .. nextLineTimeMs]`.
  */
 internal fun computeLineWordHighlightState(
     line: LyricsLine,
@@ -265,7 +321,7 @@ internal fun computeLineWordHighlightState(
         }
         val wordStart = words[activeIdx].startMs
         val wordEnd = words.getOrNull(activeIdx + 1)?.startMs
-            ?: nextLineTimeMs.coerceAtLeast(wordStart + 350L)
+            ?: nextLineTimeMs.coerceAtLeast(wordStart + 300L)
         val span = (wordEnd - wordStart).coerceAtLeast(120L).toFloat()
         val frac = ((positionMs - wordStart).toFloat() / span).coerceIn(0f, 1f)
         return activeIdx to frac
@@ -274,9 +330,9 @@ internal fun computeLineWordHighlightState(
     val wordTokens = tokenizeLyricWords(line.text).filter { it.isWord }
     if (wordTokens.isEmpty()) return 0 to 1f
 
-    val rawLineSpanMs = (nextLineTimeMs - line.timeMs).coerceIn(750L, 12_000L)
-    val effectiveDurationMs = (rawLineSpanMs.toFloat() * 0.90f).coerceAtLeast(600f)
-    val overall = ((positionMs - line.timeMs).toFloat() / effectiveDurationMs).coerceIn(0f, 1f)
+    val rawDur = (nextLineTimeMs - line.timeMs).coerceAtLeast(300L)
+    val singingDur = (rawDur * 0.85f).coerceAtMost(5500f).coerceAtLeast(250f)
+    val overall = ((positionMs - line.timeMs).toFloat() / singingDur).coerceIn(0f, 1f)
     if (overall >= 1f) {
         return wordTokens.lastIndex to 1f
     }
@@ -285,7 +341,7 @@ internal fun computeLineWordHighlightState(
     }
 
     val weights = FloatArray(wordTokens.size) { idx ->
-        (wordTokens[idx].text.length.coerceAtLeast(1) + 1).toFloat()
+        (wordTokens[idx].text.length.coerceAtLeast(1) + 0.5f)
     }
     val totalWeight = weights.sum().coerceAtLeast(1f)
     val targetWeight = overall * totalWeight
@@ -458,7 +514,11 @@ private fun FullscreenPlayerContent(
 
     LaunchedEffect(track.player, track.title, track.artist) {
         localSeekGraceUntilMsState.longValue = 0L
-        displayPositionMsState.longValue = track.positionMs
+        displayPositionMsState.longValue = if (track.durationMs > 0L) {
+            track.positionMs.coerceIn(0L, track.durationMs)
+        } else {
+            track.positionMs.coerceAtLeast(0L)
+        }
     }
 
     LaunchedEffect(
@@ -471,7 +531,11 @@ private fun FullscreenPlayerContent(
         track.hasMedia
     ) {
         if (SystemClock.elapsedRealtime() >= localSeekGraceUntilMsState.longValue) {
-            displayPositionMsState.longValue = track.positionMs
+            displayPositionMsState.longValue = if (track.durationMs > 0L) {
+                track.positionMs.coerceIn(0L, track.durationMs)
+            } else {
+                track.positionMs.coerceAtLeast(0L)
+            }
         }
         if (track.hasMedia && track.isPlaying) {
             var lastNanos = 0L
@@ -1036,8 +1100,8 @@ private fun PlayerOverflowOptionsSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = Color(0xF713161D),
-        scrimColor = Color.Black.copy(alpha = 0.38f),
+        containerColor = SheetSurface,
+        scrimColor = SheetScrim,
         dragHandle = { BottomSheetDefaults.DragHandle(color = TextMuted.copy(alpha = 0.5f)) }
     ) {
         Column(
@@ -1166,8 +1230,8 @@ private fun LyricsVariantsBottomSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = Color(0xF713161D),
-        scrimColor = Color.Black.copy(alpha = 0.38f),
+        containerColor = SheetSurface,
+        scrimColor = SheetScrim,
         dragHandle = { BottomSheetDefaults.DragHandle(color = TextMuted.copy(alpha = 0.5f)) }
     ) {
         Column(
@@ -1713,34 +1777,54 @@ private fun PlayerLyricsStage(
                 } else if (res.syncMode != LyricsSyncMode.UNSYNCED && res.lines.isNotEmpty()) {
                     val listState = rememberLazyListState()
                     var viewportHeightPx by remember { mutableIntStateOf(0) }
+                    val effectivePosMsState = remember(track.durationMs) {
+                        derivedStateOf {
+                            val raw = shownPositionMsState.value
+                            if (track.durationMs > 0L) raw.coerceIn(0L, track.durationMs) else raw.coerceAtLeast(0L)
+                        }
+                    }
                     val activeIndex by remember(res.lines) {
                         derivedStateOf {
-                            findActiveLyricsLineIndex(res.lines, shownPositionMsState.value)
+                            findActiveLyricsLineIndex(res.lines, effectivePosMsState.value)
                         }
                     }
                     val canScrollForward by remember {
                         derivedStateOf { listState.canScrollForward }
                     }
-                    var lastUserScrollMs by remember { mutableLongStateOf(0L) }
-                    LaunchedEffect(listState.isScrollInProgress) {
-                        if (listState.isScrollInProgress) {
-                            lastUserScrollMs = SystemClock.uptimeMillis()
+                    var lastUserDragMs by remember { mutableLongStateOf(0L) }
+                    var isUserDragging by remember { mutableStateOf(false) }
+
+                    LaunchedEffect(listState) {
+                        listState.interactionSource.interactions.collect { interaction ->
+                            when (interaction) {
+                                is DragInteraction.Start -> {
+                                    isUserDragging = true
+                                    lastUserDragMs = SystemClock.uptimeMillis()
+                                }
+                                is DragInteraction.Stop,
+                                is DragInteraction.Cancel -> {
+                                    isUserDragging = false
+                                    lastUserDragMs = SystemClock.uptimeMillis()
+                                }
+                            }
                         }
                     }
 
                     LaunchedEffect(activeIndex, res.lines, viewportHeightPx) {
                         if (activeIndex >= 0) {
                             val now = SystemClock.uptimeMillis()
-                            if (now - lastUserScrollMs > 3000L && !listState.isScrollInProgress) {
+                            if (now - lastUserDragMs > 3000L && !isUserDragging) {
                                 runCatching {
-                                    // Anchor active line gently in the upper third (~28% from top)
+                                    // Anchor active line cleanly at ~30% from viewport top regardless of system MotionDurationScale
                                     val targetOffset = if (viewportHeightPx > 0) {
-                                        -(viewportHeightPx * 0.28f).toInt()
+                                        -(viewportHeightPx * 0.30f).toInt()
                                     } else 0
-                                    listState.animateScrollToItem(
-                                        index = activeIndex,
-                                        scrollOffset = targetOffset
-                                    )
+                                    kotlinx.coroutines.withContext(FixedMotionScale) {
+                                        listState.animateScrollToItem(
+                                            index = activeIndex,
+                                            scrollOffset = targetOffset
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -1754,7 +1838,7 @@ private fun PlayerLyricsStage(
                         LazyColumn(
                             state = listState,
                             contentPadding = PaddingValues(top = 48.dp, bottom = 140.dp),
-                            verticalArrangement = Arrangement.spacedBy(18.dp),
+                            verticalArrangement = Arrangement.spacedBy(15.dp),
                             modifier = Modifier
                                 .fillMaxSize()
                                 .lyricsVerticalEdgeFade(
@@ -1773,25 +1857,26 @@ private fun PlayerLyricsStage(
                                 if (interlude != null) {
                                     InterludeDotsIndicator(
                                         interlude = interlude,
-                                        shownPositionMsState = shownPositionMsState,
+                                        shownPositionMsState = effectivePosMsState,
                                         timeSecondsState = livingPalette.uiTimeSecondsState,
                                         accentColor = effectiveAccent
                                     )
                                 }
 
                                 val nextLineTimeMs = res.lines.getOrNull(index + 1)?.timeMs
-                                    ?: (track.durationMs.takeIf { it > line.timeMs } ?: (line.timeMs + 4_500L))
+                                    ?: (track.durationMs.takeIf { it > line.timeMs } ?: (line.timeMs + 5_500L))
                                 SyncedLyricLineRow(
                                     line = line,
                                     index = index,
                                     activeIndex = activeIndex,
                                     nextLineTimeMs = nextLineTimeMs,
-                                    isUserScrolling = listState.isScrollInProgress,
-                                    shownPositionMsState = shownPositionMsState,
+                                    trackDurationMs = track.durationMs,
+                                    isUserScrolling = isUserDragging,
+                                    effectivePosMsState = effectivePosMsState,
                                     onSeekToLine = {
                                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                         onSeekToDisplayMs(line.timeMs)
-                                        lastUserScrollMs = 0L
+                                        lastUserDragMs = 0L
                                     },
                                     onCopyQuote = {
                                         val quote = if (track.artist.isNotBlank()) {
@@ -1821,30 +1906,43 @@ private fun PlayerLyricsStage(
                             }
                         }
 
-                        // "Jump back to current line" helper when user manually scrolls away
+                        // "Jump back to current line" helper shown ONLY when user manually scrolled away from active line
+                        val isActiveScrolledAway by remember(activeIndex) {
+                            derivedStateOf {
+                                val visibleItem = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == activeIndex }
+                                val targetTop = (viewportHeightPx * 0.30f).toInt()
+                                activeIndex >= 0 && (
+                                    visibleItem == null ||
+                                        kotlin.math.abs(visibleItem.offset - targetTop) > (viewportHeightPx * 0.28f).toInt().coerceAtLeast(120)
+                                    )
+                            }
+                        }
                         val showResumeAutoScroll by remember(activeIndex) {
                             derivedStateOf {
                                 activeIndex >= 0 &&
-                                    lastUserScrollMs > 0L &&
-                                    (SystemClock.uptimeMillis() - lastUserScrollMs <= 3000L)
+                                    lastUserDragMs > 0L &&
+                                    isActiveScrolledAway &&
+                                    (SystemClock.uptimeMillis() - lastUserDragMs <= 6000L)
                             }
                         }
                         if (showResumeAutoScroll) {
                             Surface(
                                 shape = RoundedCornerShape(999.dp),
-                                color = Color(0xEE14171E),
+                                color = SheetSurface,
                                 border = BorderStroke(0.75.dp, SpecularStroke),
                                 modifier = Modifier
                                     .align(Alignment.BottomCenter)
-                                    .padding(bottom = 8.dp)
+                                    .padding(bottom = 12.dp)
                                     .clip(RoundedCornerShape(999.dp))
                                     .clickable {
-                                        lastUserScrollMs = 0L
+                                        lastUserDragMs = 0L
                                         scope.launch {
                                             val targetOffset = if (viewportHeightPx > 0) {
-                                                -(viewportHeightPx * 0.28f).toInt()
+                                                -(viewportHeightPx * 0.30f).toInt()
                                             } else 0
-                                            listState.animateScrollToItem(activeIndex.coerceAtLeast(0), targetOffset)
+                                            kotlinx.coroutines.withContext(FixedMotionScale) {
+                                                listState.animateScrollToItem(activeIndex.coerceAtLeast(0), targetOffset)
+                                            }
                                         }
                                     }
                             ) {
@@ -2067,6 +2165,10 @@ private fun InterludeDotsIndicator(
     }
 }
 
+private val FixedMotionScale = object : MotionDurationScale {
+    override val scaleFactor: Float = 1f
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SyncedLyricLineRow(
@@ -2074,8 +2176,9 @@ private fun SyncedLyricLineRow(
     index: Int,
     activeIndex: Int,
     nextLineTimeMs: Long,
+    trackDurationMs: Long,
     isUserScrolling: Boolean,
-    shownPositionMsState: State<Long>,
+    effectivePosMsState: State<Long>,
     onSeekToLine: () -> Unit,
     onCopyQuote: () -> Unit
 ) {
@@ -2083,7 +2186,7 @@ private fun SyncedLyricLineRow(
     val isActive = index == activeIndex
 
     val targetScale = when {
-        isActive -> 1.04f
+        isActive -> 1.05f
         distance == 1 -> 0.97f
         distance == 2 -> 0.96f
         else -> 0.95f
@@ -2097,18 +2200,35 @@ private fun SyncedLyricLineRow(
         else -> 0.30f
     }
 
-    val animSpec = remember {
-        spring<Float>(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow)
+    val scaleAnim = remember { Animatable(targetScale) }
+    val alphaAnim = remember { Animatable(targetAlpha) }
+
+    LaunchedEffect(targetScale) {
+        kotlinx.coroutines.withContext(FixedMotionScale) {
+            scaleAnim.animateTo(
+                targetValue = targetScale,
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioNoBouncy,
+                    stiffness = Spring.StiffnessMediumLow
+                )
+            )
+        }
     }
-    val lineScale by animateFloatAsState(targetValue = targetScale, animationSpec = animSpec, label = "lyric_scale")
-    val lineAlpha by animateFloatAsState(targetValue = targetAlpha, animationSpec = tween(220), label = "lyric_alpha")
+    LaunchedEffect(targetAlpha) {
+        kotlinx.coroutines.withContext(FixedMotionScale) {
+            alphaAnim.animateTo(
+                targetValue = targetAlpha,
+                animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing)
+            )
+        }
+    }
 
     val rowModifier = Modifier
         .fillMaxWidth()
         .graphicsLayer {
-            scaleX = lineScale
-            scaleY = lineScale
-            alpha = lineAlpha
+            scaleX = scaleAnim.value
+            scaleY = scaleAnim.value
+            alpha = alphaAnim.value
             transformOrigin = TransformOrigin(0f, 0.5f)
         }
         .clip(RoundedCornerShape(12.dp))
@@ -2116,35 +2236,32 @@ private fun SyncedLyricLineRow(
             onClick = onSeekToLine,
             onLongClick = onCopyQuote
         )
-        .padding(horizontal = 8.dp, vertical = 4.dp)
+        .padding(horizontal = 8.dp, vertical = 3.dp)
 
     if (isActive) {
-        val unreadColor = Color.White.copy(alpha = 0.54f)
-        val wordProgress by remember(line, nextLineTimeMs) {
+        val wordQuantizedKey by remember(line, nextLineTimeMs, trackDurationMs) {
             derivedStateOf {
-                val (wIdx, rawFrac) = computeLineWordHighlightState(
-                    line = line,
-                    nextLineTimeMs = nextLineTimeMs,
-                    positionMs = shownPositionMsState.value
-                )
-                // Quantize fraction to 5% steps (~20 steps/word) so scrolling text stays 120fps light
-                val step = ((rawFrac * 20f).toInt().coerceIn(0, 20)) / 20f
-                wIdx to step
+                val pos = effectivePosMsState.value
+                // Quantize smoothly to ~20ms intervals so word gradient glides seamlessly at 60/120fps
+                (pos / 20L)
             }
         }
-        val activeWordIdx = wordProgress.first
-        val activeWordFrac = wordProgress.second
+        val wordAlphas = remember(line, nextLineTimeMs, trackDurationMs, wordQuantizedKey) {
+            computeWordAlphasForLine(
+                line = line,
+                nextLineTimeMs = nextLineTimeMs,
+                positionMs = effectivePosMsState.value,
+                durationMs = trackDurationMs
+            )
+        }
 
         val annotated = if (line.words.isNotEmpty()) {
-            remember(line.words, activeWordIdx, activeWordFrac) {
+            remember(line.words, wordAlphas) {
                 buildAnnotatedString {
                     line.words.forEachIndexed { wIndex, w ->
-                        val wordColor = when {
-                            wIndex < activeWordIdx -> Color.White
-                            wIndex == activeWordIdx -> lerp(unreadColor, Color.White, activeWordFrac)
-                            else -> unreadColor
-                        }
-                        withStyle(SpanStyle(color = wordColor)) {
+                        val wordAlpha = wordAlphas.getOrElse(wIndex) { 1f }
+                        val finalAlpha = 0.52f + (1.0f - 0.52f) * wordAlpha
+                        withStyle(SpanStyle(color = Color.White.copy(alpha = finalAlpha))) {
                             append(w.text)
                         }
                     }
@@ -2152,18 +2269,15 @@ private fun SyncedLyricLineRow(
             }
         } else {
             val tokens = remember(line.text) { tokenizeLyricWords(line.text) }
-            remember(tokens, activeWordIdx, activeWordFrac) {
+            remember(tokens, wordAlphas) {
                 buildAnnotatedString {
                     tokens.forEach { token ->
                         if (!token.isWord) {
                             append(token.text)
                         } else {
-                            val wordColor = when {
-                                token.wordOrdinal < activeWordIdx -> Color.White
-                                token.wordOrdinal == activeWordIdx -> lerp(unreadColor, Color.White, activeWordFrac)
-                                else -> unreadColor
-                            }
-                            withStyle(SpanStyle(color = wordColor)) {
+                            val wordAlpha = wordAlphas.getOrElse(token.wordOrdinal) { 1f }
+                            val finalAlpha = 0.52f + (1.0f - 0.52f) * wordAlpha
+                            withStyle(SpanStyle(color = Color.White.copy(alpha = finalAlpha))) {
                                 append(token.text)
                             }
                         }
@@ -2175,8 +2289,8 @@ private fun SyncedLyricLineRow(
         Text(
             text = annotated,
             style = MaterialTheme.typography.titleLarge.copy(
-                fontSize = 21.sp,
-                lineHeight = 29.sp,
+                fontSize = 20.sp,
+                lineHeight = 25.sp,
                 fontWeight = FontWeight.Bold
             ),
             modifier = rowModifier
@@ -2185,8 +2299,8 @@ private fun SyncedLyricLineRow(
         Text(
             text = line.text,
             style = MaterialTheme.typography.titleLarge.copy(
-                fontSize = 21.sp,
-                lineHeight = 29.sp,
+                fontSize = 20.sp,
+                lineHeight = 25.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = Color.White
             ),
@@ -2638,8 +2752,8 @@ private fun PlayerStyleSettingsSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = Color(0xF513161D),
-        scrimColor = Color.Black.copy(alpha = 0.35f),
+        containerColor = SheetSurface,
+        scrimColor = SheetScrim,
         dragHandle = { BottomSheetDefaults.DragHandle(color = TextMuted.copy(alpha = 0.5f)) }
     ) {
         Column(

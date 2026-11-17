@@ -98,6 +98,7 @@ private object NetworkDiagnosticsInterceptor : Interceptor {
         } catch (t: Throwable) {
             val elapsedMs = (System.nanoTime() - startedNs) / 1_000_000L
             if (t !is HostCooldownException) {
+                HostCooldownGuard.recordNetworkFailure(category, t.javaClass.simpleName)
                 NetworkLogStore.record(
                     category = category,
                     method = request.method,
@@ -208,10 +209,11 @@ object BridgeHttpClient {
                     }
                 }
             } catch (e: HostCooldownException) {
+                val timeLabel = NetworkLogStore.formatTimestampHHmm(e.cooldownUntilMs)
                 return DetailedTextResult(
                     httpCode = e.httpCode,
                     body = null,
-                    errorLabel = "Пауза HTTP ${e.httpCode} до ${NetworkLogStore.formatTimestampHHmm(e.cooldownUntilMs)}",
+                    errorLabel = if (e.httpCode > 0) "Пауза HTTP ${e.httpCode} до $timeLabel" else "Пауза до $timeLabel",
                     isCooldown = true
                 )
             } catch (e: SocketTimeoutException) {
